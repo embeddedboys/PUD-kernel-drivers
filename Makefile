@@ -5,7 +5,7 @@ KERN_DIR:=/lib/modules/$(shell uname -r)/build
 # users kernel dir
 # KERN_DIR:=/home/user/linux
 
-MODULE_NAME:=udd
+MODULE_NAME:=pud
 
 all:
 	make -C $(KERN_DIR) M=`pwd` modules
