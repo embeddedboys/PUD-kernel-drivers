@@ -6,8 +6,8 @@
  * Author: Zheng Hua <hua.zheng@embeddedboys.com>
  */
 
-#ifndef __UDD_H
-#define __UDD_H
+#ifndef __pud_H
+#define __pud_H
 
 #include <linux/kernel.h>
 #include <linux/usb.h>
@@ -29,22 +29,22 @@
 #include <drm/drm_gem_framebuffer_helper.h>
 
 /* Display backends select, fbdev is default */
-#define UDD_DISP_BACKEND_FBDEV 0
-#define UDD_DISP_BACKEND_DRM   1
+#define pud_DISP_BACKEND_FBDEV 0
+#define pud_DISP_BACKEND_DRM   1
 
-#ifndef UDD_DEF_DISP_BACKEND
-    #define UDD_DEF_DISP_BACKEND UDD_DISP_BACKEND_DRM
+#ifndef pud_DEF_DISP_BACKEND
+    #define pud_DEF_DISP_BACKEND pud_DISP_BACKEND_DRM
 #endif
 
 /* Whether to enable input device */
-#ifndef UDD_ENABLE_INPUT_SUPPORT
-    #define UDD_ENABLE_INPUT_SUPPORT    1
+#ifndef pud_ENABLE_INPUT_SUPPORT
+    #define pud_ENABLE_INPUT_SUPPORT    1
 #endif
 
 // TODO: Currently only support less than 40000 bytes transfer
 #define USB_TRANS_MAX_SIZE  65535
 
-#define UDD_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
+#define pud_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
 
 #define EP0_IN_ADDR  (USB_DIR_IN  | 0)
 #define EP0_OUT_ADDR (USB_DIR_OUT | 0)
@@ -60,7 +60,7 @@
 #define REQ_EP2_IN   0X03
 #define REQ_EP4_IN   0x05
 
-struct udd_display {
+struct pud_display {
     u32     xres;
     u32     yres;
     u32     bpp;
@@ -68,7 +68,7 @@ struct udd_display {
     u32     rotate;
 };
 
-struct udd {
+struct pud {
     u64 dma_mask;
     struct device          *dev;
 
@@ -80,7 +80,7 @@ struct udd {
 
     /* Framebuffer specific data */
     struct fb_info        *info;
-    struct udd_display    *display;
+    struct pud_display    *display;
 
     /* Encoder data */
     u8 *encoder_buf;
@@ -103,20 +103,20 @@ struct udd {
     struct touchscreen_properties props;
 };
 
-struct fb_info *udd_framebuffer_alloc(struct udd_display *display,
+struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
                                       struct device *dev);
-void udd_framebuffer_release(struct fb_info *info);
-int udd_register_framebuffer(struct fb_info *info);
-int udd_unregister_framebuffer(struct fb_info *info);
+void pud_framebuffer_release(struct fb_info *info);
+int pud_register_framebuffer(struct fb_info *info);
+int pud_unregister_framebuffer(struct fb_info *info);
 
-struct drm_device *udd_drm_alloc(struct device *dev);
-void udd_drm_release(struct drm_device *drm);
-int udd_drm_register(struct drm_device *drm);
-void udd_drm_unregister(struct drm_device *drm);
+struct drm_device *pud_drm_alloc(struct device *dev);
+void pud_drm_release(struct drm_device *drm);
+int pud_drm_register(struct drm_device *drm);
+void pud_drm_unregister(struct drm_device *drm);
 
-int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id);
-int udd_input_cleanup(struct usb_interface *intf);
+int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id);
+int pud_input_cleanup(struct usb_interface *intf);
 
-ssize_t udd_flush(struct udd *udd, u16 x, u16 y, const u8 jpeg_data[], size_t data_size);
+ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[], size_t data_size);
 
 #endif

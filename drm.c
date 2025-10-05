@@ -6,7 +6,7 @@
  * Author: Zheng Hua <hua.zheng@embeddedboys.com>
  */
 
-#define pr_fmt(fmt) "udd-drm: " fmt
+#define pr_fmt(fmt) "pud-drm: " fmt
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -14,42 +14,42 @@
 #include <linux/version.h>
 #include <video/mipi_display.h>
 
-#include "udd.h"
+#include "pud.h"
 #include "encoder.h"
 
-#define DRV_NAME "udd-drm"
+#define DRV_NAME "pud-drm"
 
-static inline struct udd *drm_to_udd(struct drm_device *drm)
+static inline struct pud *drm_to_pud(struct drm_device *drm)
 {
-    return container_of(drm, struct udd, drm);
+    return container_of(drm, struct pud, drm);
 }
 
-static enum drm_mode_status udd_drm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
+static enum drm_mode_status pud_drm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 					      const struct drm_display_mode *mode)
 {
-    struct udd *udd = drm_to_udd(pipe->crtc.dev);
+    struct pud *pud = drm_to_pud(pipe->crtc.dev);
     int rc;
-    rc = drm_crtc_helper_mode_valid_fixed(&pipe->crtc, mode, &udd->mode);
+    rc = drm_crtc_helper_mode_valid_fixed(&pipe->crtc, mode, &pud->mode);
     pr_info("%s, rc: %d\n", __func__, rc);
     return rc;
 }
 
-static void udd_drm_pipe_enable(struct drm_simple_display_pipe *pipe,
+static void pud_drm_pipe_enable(struct drm_simple_display_pipe *pipe,
 				  struct drm_crtc_state *crtc_state,
 				  struct drm_plane_state *plane_state)
 {
     pr_info("%s\n", __func__);
 }
 
-static void udd_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
+static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
 {
     pr_info("%s\n", __func__);
 }
 
-static int udd_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer *fb,
+static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer *fb,
                         struct drm_rect *clip, bool swap)
 {
-    struct udd *udd = drm_to_udd(fb->dev);
+    struct pud *pud = drm_to_pud(fb->dev);
     // struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
     struct iosys_map dst_map = IOSYS_MAP_INIT_VADDR(dst);
     int ret;
@@ -69,7 +69,7 @@ static int udd_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
     //     drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
     //     break;
     case DRM_FORMAT_XRGB8888:
-        switch (udd->pixel_format) {
+        switch (pud->pixel_format) {
         case DRM_FORMAT_RGB565:
             drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
             break;
@@ -89,10 +89,10 @@ static int udd_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
     return ret;
 }
 
-static void udd_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
+static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
                         struct drm_rect *rect)
 {
-    struct udd *udd = drm_to_udd(fb->dev);
+    struct pud *pud = drm_to_pud(fb->dev);
     unsigned int height = rect->y2 - rect->y1;
     unsigned int width = rect->x2 - rect->x1;
     ssize_t jpeg_length = 0;
@@ -100,20 +100,20 @@ static void udd_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
     int ret = 0;
     void *tr;
 
-    tr = udd->tx_buf;
-    ret = udd_buf_copy(tr, src, fb, rect, swap);
+    tr = pud->tx_buf;
+    ret = pud_buf_copy(tr, src, fb, rect, swap);
 
     jpeg_encode_rgb565(tr, width, height, width * height * sizeof(u16),
-            udd->encoder_buf, &jpeg_length, udd->encoder_quality);
+            pud->encoder_buf, &jpeg_length, pud->encoder_quality);
 
     // pr_info("%s, w: %d, h: %d, len : %ld\n", __func__, width, height, jpeg_length);
     if (jpeg_length > USB_TRANS_MAX_SIZE)
         jpeg_length = USB_TRANS_MAX_SIZE - 1;
 
-    udd_flush(udd, rect->x1, rect->y1, udd->encoder_buf, jpeg_length);
+    pud_flush(pud, rect->x1, rect->y1, pud->encoder_buf, jpeg_length);
 }
 
-static void udd_drm_pipe_update(struct drm_simple_display_pipe *pipe,
+static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
                                 struct drm_plane_state *old_state)
 {
     struct drm_plane_state *state = pipe->plane.state;
@@ -133,64 +133,64 @@ static void udd_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 
     if (drm_atomic_helper_damage_merged(old_state, state, &rect)) {
         drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n", fb->base.id, DRM_RECT_ARG(&rect));
-        udd_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
+        pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
     }
 
     drm_dev_exit(idx);
 }
 
-static int udd_drm_pipe_begin_fb_access(struct drm_simple_display_pipe *pipe,
+static int pud_drm_pipe_begin_fb_access(struct drm_simple_display_pipe *pipe,
 				  struct drm_plane_state *plane_state)
 {
     return drm_gem_begin_shadow_fb_access(&pipe->plane, plane_state);
 }
 
-static void udd_drm_pipe_end_fb_access(struct drm_simple_display_pipe *pipe,
+static void pud_drm_pipe_end_fb_access(struct drm_simple_display_pipe *pipe,
 				 struct drm_plane_state *plane_state)
 {
 	drm_gem_end_shadow_fb_access(&pipe->plane, plane_state);
 }
 
-static void udd_drm_pipe_reset_plane(struct drm_simple_display_pipe *pipe)
+static void pud_drm_pipe_reset_plane(struct drm_simple_display_pipe *pipe)
 {
 	drm_gem_reset_shadow_plane(&pipe->plane);
 }
 
-static struct drm_plane_state *udd_drm_pipe_duplicate_plane_state(struct drm_simple_display_pipe *pipe)
+static struct drm_plane_state *pud_drm_pipe_duplicate_plane_state(struct drm_simple_display_pipe *pipe)
 {
 	return drm_gem_duplicate_shadow_plane_state(&pipe->plane);
 }
 
-static void udd_drm_pipe_destroy_plane_state(struct drm_simple_display_pipe *pipe,
+static void pud_drm_pipe_destroy_plane_state(struct drm_simple_display_pipe *pipe,
 				       struct drm_plane_state *plane_state)
 {
 	drm_gem_destroy_shadow_plane_state(&pipe->plane, plane_state);
 }
 
-static const struct drm_simple_display_pipe_funcs udd_display_pipe_funcs = {
-    .mode_valid = udd_drm_pipe_mode_valid,
-    .enable = udd_drm_pipe_enable,
-    .disable = udd_drm_pipe_disable,
-    .update = udd_drm_pipe_update,
-    .begin_fb_access = udd_drm_pipe_begin_fb_access,
-    .end_fb_access = udd_drm_pipe_end_fb_access,
-    .reset_plane = udd_drm_pipe_reset_plane,
-    .duplicate_plane_state = udd_drm_pipe_duplicate_plane_state,
-    .destroy_plane_state = udd_drm_pipe_destroy_plane_state,
+static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
+    .mode_valid = pud_drm_pipe_mode_valid,
+    .enable = pud_drm_pipe_enable,
+    .disable = pud_drm_pipe_disable,
+    .update = pud_drm_pipe_update,
+    .begin_fb_access = pud_drm_pipe_begin_fb_access,
+    .end_fb_access = pud_drm_pipe_end_fb_access,
+    .reset_plane = pud_drm_pipe_reset_plane,
+    .duplicate_plane_state = pud_drm_pipe_duplicate_plane_state,
+    .destroy_plane_state = pud_drm_pipe_destroy_plane_state,
 };
 
-static int udd_connector_get_modes(struct drm_connector *connector)
+static int pud_connector_get_modes(struct drm_connector *connector)
 {
-	struct udd *udd = drm_to_udd(connector->dev);
+	struct pud *pud = drm_to_pud(connector->dev);
 
-	return drm_connector_helper_get_modes_fixed(connector, &udd->mode);
+	return drm_connector_helper_get_modes_fixed(connector, &pud->mode);
 }
 
-static const struct drm_connector_helper_funcs udd_connector_hfuncs = {
-    .get_modes = udd_connector_get_modes,
+static const struct drm_connector_helper_funcs pud_connector_hfuncs = {
+    .get_modes = pud_connector_get_modes,
 };
 
-static const struct drm_connector_funcs udd_connector_funcs = {
+static const struct drm_connector_funcs pud_connector_funcs = {
     .reset = drm_atomic_helper_connector_reset,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = drm_connector_cleanup,
@@ -198,35 +198,35 @@ static const struct drm_connector_funcs udd_connector_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
-static const struct drm_mode_config_funcs udd_drm_mode_config_funcs = {
+static const struct drm_mode_config_funcs pud_drm_mode_config_funcs = {
     .fb_create = drm_gem_fb_create_with_dirty,
     .atomic_check = drm_atomic_helper_check,
     .atomic_commit = drm_atomic_helper_commit,
 };
 
-static const uint32_t udd_drm_formats[] = {
+static const uint32_t pud_drm_formats[] = {
     DRM_FORMAT_RGB565,      /* device pixel format */
     DRM_FORMAT_XRGB8888,    /* DRM driver framebuffer format */
 };
 
-static const struct drm_display_mode udd_disp_mode = {
+static const struct drm_display_mode pud_disp_mode = {
     DRM_MODE_INIT(60, 480, 320, 85, 55),
 };
 
-DEFINE_DRM_GEM_DMA_FOPS(udd_drm_fops);
+DEFINE_DRM_GEM_DMA_FOPS(pud_drm_fops);
 
-static const struct drm_driver udd_drm_driver = {
+static const struct drm_driver pud_drm_driver = {
     .driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
-    .fops = &udd_drm_fops,
+    .fops = &pud_drm_fops,
     DRM_GEM_DMA_DRIVER_OPS_VMAP,
-    .name = "udd-drm",
-    .desc = "UDD DRM driver",
+    .name = "pud-drm",
+    .desc = "pud DRM driver",
     .date = "20250119",
     .major = 1,
     .minor = 0,
 };
 
-static int udd_drm_dev_init_with_formats(struct udd *udd,
+static int pud_drm_dev_init_with_formats(struct pud *pud,
                 const struct drm_simple_display_pipe_funcs *funcs,
                 const uint32_t *formats, unsigned int formats_count,
                 const struct drm_display_mode *mode, size_t tx_buf_size)
@@ -235,7 +235,7 @@ static int udd_drm_dev_init_with_formats(struct udd *udd,
 		DRM_FORMAT_MOD_LINEAR,
 		DRM_FORMAT_MOD_INVALID
 	};
-    struct drm_device *drm = &udd->drm;
+    struct drm_device *drm = &pud->drm;
     struct page **pages;
     unsigned int i, num_pages;
     void *ptr;
@@ -249,16 +249,16 @@ static int udd_drm_dev_init_with_formats(struct udd *udd,
         return rc;
     }
 
-    udd->tx_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
-    if (!udd->tx_buf)
+    pud->tx_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
+    if (!pud->tx_buf)
         return -ENOMEM;
 
-    // udd->encoder_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
-    // if (!udd->encoder_buf)
+    // pud->encoder_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
+    // if (!pud->encoder_buf)
     //     return -ENOMEM;
 
-    udd->encoder_buf = vmalloc_32(tx_buf_size);
-    if (!udd->encoder_buf)
+    pud->encoder_buf = vmalloc_32(tx_buf_size);
+    if (!pud->encoder_buf)
         return -ENOMEM;
 
     num_pages = DIV_ROUND_UP(tx_buf_size, PAGE_SIZE);
@@ -268,85 +268,85 @@ static int udd_drm_dev_init_with_formats(struct udd *udd,
 
     DRM_DEBUG_KMS("%s, %d\n", __func__, num_pages);
 
-    for (i = 0, ptr = udd->encoder_buf; i < num_pages; i++, ptr += PAGE_SIZE)
+    for (i = 0, ptr = pud->encoder_buf; i < num_pages; i++, ptr += PAGE_SIZE)
         pages[i] = vmalloc_to_page(ptr);
 
-    rc = sg_alloc_table_from_pages(&udd->bulk_sgt, pages, num_pages,
+    rc = sg_alloc_table_from_pages(&pud->bulk_sgt, pages, num_pages,
                             0, tx_buf_size, GFP_KERNEL);
 
     kfree(pages);
 
     /* TODO: use debugfs to set params */
-    // udd->encoder_quality = JPEGE_Q_BEST;
-    // udd->encoder_quality = JPEGE_Q_HIGH;
-    // udd->encoder_quality = JPEGE_Q_MED;
-    udd->encoder_quality = JPEGE_Q_LOW;
+    // pud->encoder_quality = JPEGE_Q_BEST;
+    // pud->encoder_quality = JPEGE_Q_HIGH;
+    // pud->encoder_quality = JPEGE_Q_MED;
+    pud->encoder_quality = JPEGE_Q_LOW;
 
-    drm_mode_copy(&udd->mode, mode);
-    pr_info("mode: %ux%u\n", udd->mode.hdisplay, udd->mode.vdisplay);
+    drm_mode_copy(&pud->mode, mode);
+    pr_info("mode: %ux%u\n", pud->mode.hdisplay, pud->mode.vdisplay);
 
-    drm_connector_helper_add(&udd->connector, &udd_connector_hfuncs);
-    rc = drm_connector_init(drm, &udd->connector, &udd_connector_funcs,
+    drm_connector_helper_add(&pud->connector, &pud_connector_hfuncs);
+    rc = drm_connector_init(drm, &pud->connector, &pud_connector_funcs,
                             DRM_MODE_CONNECTOR_USB);
     if (rc) {
         pr_err("failed to init connector\n");
         return rc;
     }
 
-    rc = drm_simple_display_pipe_init(drm, &udd->pipe, funcs, formats, formats_count, modifiers, &udd->connector);
+    rc = drm_simple_display_pipe_init(drm, &pud->pipe, funcs, formats, formats_count, modifiers, &pud->connector);
     if (rc) {
         pr_err("failed to init pipe\n");
         return rc;
     }
 
-    drm_plane_enable_fb_damage_clips(&udd->pipe.plane);
+    drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
 
-    drm->mode_config.funcs = &udd_drm_mode_config_funcs;
-    drm->mode_config.min_width = udd->mode.hdisplay;
-    drm->mode_config.max_width = udd->mode.hdisplay;
-    drm->mode_config.min_height = udd->mode.vdisplay;
-    drm->mode_config.max_height = udd->mode.vdisplay;
-    udd->pixel_format = formats[0];
+    drm->mode_config.funcs = &pud_drm_mode_config_funcs;
+    drm->mode_config.min_width = pud->mode.hdisplay;
+    drm->mode_config.max_width = pud->mode.hdisplay;
+    drm->mode_config.min_height = pud->mode.vdisplay;
+    drm->mode_config.max_height = pud->mode.vdisplay;
+    pud->pixel_format = formats[0];
 
-    DRM_DEBUG_KMS("mode: %ux%u", udd->mode.hdisplay, udd->mode.vdisplay);
+    DRM_DEBUG_KMS("mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
 
     return 0;
 }
 
-static int udd_drm_dev_init(struct udd *udd,
+static int pud_drm_dev_init(struct pud *pud,
                 const struct drm_simple_display_pipe_funcs *funcs,
                 const struct drm_display_mode *mode)
 {
     ssize_t bufsize = mode->vdisplay * mode->hdisplay * sizeof(u16);
 
-    udd->drm.mode_config.preferred_depth = 16;
+    pud->drm.mode_config.preferred_depth = 16;
 
     pr_info("%s\n", __func__);
 
-    return udd_drm_dev_init_with_formats(udd, funcs, udd_drm_formats,
-                        ARRAY_SIZE(udd_drm_formats), mode, bufsize);
+    return pud_drm_dev_init_with_formats(pud, funcs, pud_drm_formats,
+                        ARRAY_SIZE(pud_drm_formats), mode, bufsize);
 }
 
-struct drm_device *udd_drm_alloc(struct device *dev)
+struct drm_device *pud_drm_alloc(struct device *dev)
 {
-    struct udd *udd;
+    struct pud *pud;
     struct drm_device *drm;
     int rc;
 
     pr_info("%s\n", __func__);
-    udd = devm_drm_dev_alloc(dev, &udd_drm_driver,
-                    struct udd, drm);
-    if (IS_ERR(udd)) {
+    pud = devm_drm_dev_alloc(dev, &pud_drm_driver,
+                    struct pud, drm);
+    if (IS_ERR(pud)) {
         pr_err("failed to allocate drm\n");
         return ERR_PTR(-ENOMEM);
     }
-    drm = &udd->drm;
+    drm = &pud->drm;
 
-    udd->dma_mask = DMA_BIT_MASK(32);
-    dev->dma_mask = &udd->dma_mask;
-    dev->coherent_dma_mask = udd->dma_mask;
+    pud->dma_mask = DMA_BIT_MASK(32);
+    dev->dma_mask = &pud->dma_mask;
+    dev->coherent_dma_mask = pud->dma_mask;
 
-    rc = udd_drm_dev_init(udd, &udd_display_pipe_funcs, &udd_disp_mode);
+    rc = pud_drm_dev_init(pud, &pud_display_pipe_funcs, &pud_disp_mode);
     if (rc) {
         pr_err("failed to init drm dev\n");
         return ERR_PTR(-ENOMEM);
@@ -355,12 +355,12 @@ struct drm_device *udd_drm_alloc(struct device *dev)
     return drm;
 }
 
-void udd_drm_release(struct drm_device *drm)
+void pud_drm_release(struct drm_device *drm)
 {
     pr_info("%s\n", __func__);
 }
 
-int udd_drm_register(struct drm_device *drm)
+int pud_drm_register(struct drm_device *drm)
 {
     int rc;
 
@@ -379,16 +379,16 @@ int udd_drm_register(struct drm_device *drm)
     return 0;
 }
 
-void udd_drm_unregister(struct drm_device *drm)
+void pud_drm_unregister(struct drm_device *drm)
 {
-    struct udd *udd = drm_to_udd(drm);
+    struct pud *pud = drm_to_pud(drm);
 
     pr_info("%s\n", __func__);
     drm_kms_helper_poll_fini(drm);
     drm_dev_unplug(drm);
     drm_atomic_helper_shutdown(drm);
 
-    sg_free_table(&udd->bulk_sgt);
-    vfree(udd->encoder_buf);
-    udd->encoder_buf = NULL;
+    sg_free_table(&pud->bulk_sgt);
+    vfree(pud->encoder_buf);
+    pud->encoder_buf = NULL;
 }

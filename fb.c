@@ -6,7 +6,7 @@
  * Author: Zheng Hua <hua.zheng@embeddedboys.com>
  */
 
-#define DRV_NAME "udd-fb"
+#define DRV_NAME "pud-fb"
 #define pr_fmt(fmt) DRV_NAME": " fmt
 
 #include <linux/init.h>
@@ -15,7 +15,7 @@
 #include <linux/version.h>
 #include <linux/fb.h>
 
-#include "udd.h"
+#include "pud.h"
 #include "encoder.h"
 
 struct dirty_area {
@@ -25,14 +25,14 @@ struct dirty_area {
     u32 y2;
 };
 
-static ssize_t udd_fb_read(struct fb_info *info, char __user *buf,
+static ssize_t pud_fb_read(struct fb_info *info, char __user *buf,
 			   size_t count, loff_t *ppos)
 {
     pr_info("%s\n", __func__);
     return fb_sys_read(info, buf, count, ppos);
 }
 
-static ssize_t udd_fb_write(struct fb_info *info, const char __user *buf,
+static ssize_t pud_fb_write(struct fb_info *info, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
     ssize_t ret = 0;
@@ -42,19 +42,19 @@ static ssize_t udd_fb_write(struct fb_info *info, const char __user *buf,
     return ret;
 }
 
-static void udd_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
+static void pud_fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
     pr_info("%s\n", __func__);
     sys_fillrect(info, rect);
 }
 
-static void udd_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
+static void pud_fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
     pr_info("%s\n", __func__);
     sys_copyarea(info, area);
 }
 
-static void udd_fb_imageblit(struct fb_info *info, const struct fb_image *image)
+static void pud_fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
     pr_info("%s\n", __func__);
     //sys_imageblit(info, image);
@@ -68,7 +68,7 @@ static unsigned int chan_to_field(unsigned int chan, struct fb_bitfield *bf)
     return chan << bf->offset;
 }
 
-static int udd_fb_setcolreg(unsigned int regno, unsigned int red,
+static int pud_fb_setcolreg(unsigned int regno, unsigned int red,
                                 unsigned int green, unsigned int blue,
                                 unsigned int transp, struct fb_info *info)
 {
@@ -99,7 +99,7 @@ static int udd_fb_setcolreg(unsigned int regno, unsigned int red,
     return ret;
 }
 
-static int udd_fb_blank(int blank, struct fb_info *info)
+static int pud_fb_blank(int blank, struct fb_info *info)
 {
     int ret = -EINVAL;
 
@@ -117,15 +117,15 @@ static int udd_fb_blank(int blank, struct fb_info *info)
     return ret;
 }
 
-static void udd_fb_deferred_io(struct fb_info *info, struct list_head *pagereflist)
+static void pud_fb_deferred_io(struct fb_info *info, struct list_head *pagereflist)
 {
     ssize_t jpeg_length = 0;
     // struct fb_deferred_io_pageref *pageref;
     // struct dirty_area area = {0};
     // uint y_cur, y_end;
-    struct udd *udd;
+    struct pud *pud;
 
-    udd = info->par;
+    pud = info->par;
 
 // TODO: support partial update
 #ifdef SUPPORT_PARTIAL_UPDATE
@@ -149,16 +149,16 @@ static void udd_fb_deferred_io(struct fb_info *info, struct list_head *pagerefli
 #endif
 
     jpeg_encode_rgb565(info->screen_buffer, info->var.xres, info->var.yres,
-                info->fix.line_length * info->var.yres, udd->encoder_buf,
-                &jpeg_length, udd->encoder_quality);
+                info->fix.line_length * info->var.yres, pud->encoder_buf,
+                &jpeg_length, pud->encoder_quality);
 
     if (jpeg_length > USB_TRANS_MAX_SIZE)
         jpeg_length = USB_TRANS_MAX_SIZE - 1;
 
-    udd_flush(udd, 0, 0, udd->encoder_buf, jpeg_length);
+    pud_flush(pud, 0, 0, pud->encoder_buf, jpeg_length);
 }
 
-struct fb_info *udd_framebuffer_alloc(struct udd_display *display,
+struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
                                       struct device *dev)
 {
     struct fb_deferred_io *fbdefio;
@@ -195,7 +195,7 @@ struct fb_info *udd_framebuffer_alloc(struct udd_display *display,
         goto err_free_fbops;
     }
 
-    info = framebuffer_alloc(sizeof(struct udd), dev);
+    info = framebuffer_alloc(sizeof(struct pud), dev);
     if (!info) {
         pr_err("failed to allocate info\n");
         goto err_free_fbdefio;
@@ -207,13 +207,13 @@ struct fb_info *udd_framebuffer_alloc(struct udd_display *display,
     info->fbdefio = fbdefio;
 
     fbops->owner        = THIS_MODULE;
-    fbops->fb_read      = udd_fb_read,
-    fbops->fb_write     = udd_fb_write;
-    fbops->fb_fillrect  = udd_fb_fillrect;
-    fbops->fb_copyarea  = udd_fb_copyarea;
-    fbops->fb_imageblit = udd_fb_imageblit;
-    fbops->fb_setcolreg = udd_fb_setcolreg;
-    fbops->fb_blank     = udd_fb_blank;
+    fbops->fb_read      = pud_fb_read,
+    fbops->fb_write     = pud_fb_write;
+    fbops->fb_fillrect  = pud_fb_fillrect;
+    fbops->fb_copyarea  = pud_fb_copyarea;
+    fbops->fb_imageblit = pud_fb_imageblit;
+    fbops->fb_setcolreg = pud_fb_setcolreg;
+    fbops->fb_blank     = pud_fb_blank;
 
 // TODO: Find out which version requires mmap to be implemented.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
@@ -252,7 +252,7 @@ struct fb_info *udd_framebuffer_alloc(struct udd_display *display,
 
     fbdefio->delay = HZ / display->fps;
     fbdefio->sort_pagereflist = true;
-    fbdefio->deferred_io = udd_fb_deferred_io;
+    fbdefio->deferred_io = pud_fb_deferred_io;
     fb_deferred_io_init(info);
 
     return info;
@@ -266,27 +266,27 @@ err_free_vmem:
     return NULL;
 }
 
-void udd_framebuffer_release(struct fb_info *info)
+void pud_framebuffer_release(struct fb_info *info)
 {
     fb_deferred_io_cleanup(info);
     vfree(info->screen_buffer);
     framebuffer_release(info);
 }
 
-int udd_register_framebuffer(struct fb_info *info)
+int pud_register_framebuffer(struct fb_info *info)
 {
     int rc;
     rc = register_framebuffer(info);
     return rc;
 }
 
-int udd_unregister_framebuffer(struct fb_info *info)
+int pud_unregister_framebuffer(struct fb_info *info)
 {
     unregister_framebuffer(info);
     return 0;
 }
 
-// static int __init udd_fb_init(void)
+// static int __init pud_fb_init(void)
 // {
 //     pr_info("%s\n", __func__);
 
@@ -308,7 +308,7 @@ int udd_unregister_framebuffer(struct fb_info *info)
 //         goto err_free_class;
 //     }
 
-//     udd_fb_alloc(dfb);
+//     pud_fb_alloc(dfb);
 //     return 0;
 
 // err_free_class:
@@ -318,7 +318,7 @@ int udd_unregister_framebuffer(struct fb_info *info)
 //     return -ENOMEM;
 // }
 
-// static void __exit udd_fb_exit(void)
+// static void __exit pud_fb_exit(void)
 // {
 //     pr_info("%s\n", __func__);
 

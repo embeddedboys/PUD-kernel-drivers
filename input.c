@@ -12,33 +12,33 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 
-#include "udd.h"
+#include "pud.h"
 
-static void udd_tp_work(struct work_struct *work)
+static void pud_tp_work(struct work_struct *work)
 {
-	struct udd *udd = container_of(work, struct udd, work);
-	struct urb *urb = udd->input_urb;
+	struct pud *pud = container_of(work, struct pud, work);
+	struct urb *urb = pud->input_urb;
 	// u8 control_buffer[4] = {0};
 	int ret;
 
 	usb_control_msg(
-		udd->udev,
-		usb_sndctrlpipe(udd->udev, EP0_OUT_ADDR),
+		pud->udev,
+		usb_sndctrlpipe(pud->udev, EP0_OUT_ADDR),
 		REQ_EP4_IN,
 		TYPE_VENDOR | USB_DIR_OUT,
 		0, 0,
 		NULL,
 		0,
-		UDD_DEFAULT_TIMEOUT
+		pud_DEFAULT_TIMEOUT
 	);
 
 	ret = usb_submit_urb(urb, GFP_KERNEL);
 }
 
-static void udd_tp_urb_callback(struct urb *urb)
+static void pud_tp_urb_callback(struct urb *urb)
 {
-	struct udd *udd = urb->context;
-	struct input_dev *indev = udd->indev;
+	struct pud *pud = urb->context;
+	struct input_dev *indev = pud->indev;
 	bool pressed;
 	u16 x, y;
 
@@ -47,42 +47,42 @@ static void udd_tp_urb_callback(struct urb *urb)
 		return;
 	}
 
-	pressed = udd->ep_int_buf[0];
-	x = udd->ep_int_buf[1] << 8 | udd->ep_int_buf[2];
-	y = udd->ep_int_buf[3] << 8 | udd->ep_int_buf[4];
+	pressed = pud->ep_int_buf[0];
+	x = pud->ep_int_buf[1] << 8 | pud->ep_int_buf[2];
+	y = pud->ep_int_buf[3] << 8 | pud->ep_int_buf[4];
 
 	input_report_key(indev, BTN_TOUCH, pressed);
 	input_report_key(indev, BTN_LEFT, pressed);
 	input_report_abs(indev, ABS_X, x);
 	input_report_abs(indev, ABS_Y, y);
-	// touchscreen_report_pos(indev, &udd->props, x, y, 0);
+	// touchscreen_report_pos(indev, &pud->props, x, y, 0);
 
 	input_sync(indev);
 
-	schedule_work(&udd->work);
+	schedule_work(&pud->work);
 }
 
-static int udd_tp_indev_open(struct input_dev *dev)
+static int pud_tp_indev_open(struct input_dev *dev)
 {
 	return 0;
 }
 
-static void udd_tp_indev_close(struct input_dev *dev)
+static void pud_tp_indev_close(struct input_dev *dev)
 {
 
 }
 
-int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
+int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct usb_endpoint_descriptor *endpoint_desc;
 	struct usb_host_interface *interface;
 	struct input_dev *input_dev;
-	struct udd *udd;
+	struct pud *pud;
 	int pipe, maxp;
 	int i, rc;
 
-	udd = usb_get_intfdata(intf);
+	pud = usb_get_intfdata(intf);
 
 	interface = intf->cur_altsetting;
 	// printk("num of eps : %d\n", interface->desc.bNumEndpoints);
@@ -97,29 +97,29 @@ int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 		return -ENODEV;
 	}
 
-	udd->input_urb = usb_alloc_urb(0, GFP_KERNEL);
-	if (!udd->input_urb)
+	pud->input_urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!pud->input_urb)
 	    return -ENOMEM;
 
 	pipe = usb_rcvintpipe(udev, endpoint_desc->bEndpointAddress);
-	maxp = usb_maxpacket(udd->udev, pipe);
+	maxp = usb_maxpacket(pud->udev, pipe);
 
-	udd->ep_int_buf = kmalloc(maxp, GFP_KERNEL);
-	if (!udd->ep_int_buf)
+	pud->ep_int_buf = kmalloc(maxp, GFP_KERNEL);
+	if (!pud->ep_int_buf)
 		goto free_urb;
 
 	usb_fill_int_urb(
-		udd->input_urb,
+		pud->input_urb,
 		udev,
 		pipe,
-		udd->ep_int_buf,
+		pud->ep_int_buf,
 		maxp,
-		udd_tp_urb_callback,
-		udd,
+		pud_tp_urb_callback,
+		pud,
 		endpoint_desc->bInterval
 	);
 
-	INIT_WORK(&udd->work, udd_tp_work);
+	INIT_WORK(&pud->work, pud_tp_work);
 
 	input_dev = devm_input_allocate_device(&intf->dev);
 	if (!input_dev) {
@@ -128,14 +128,14 @@ int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	}
 
 	input_dev->dev.parent = &intf->dev;
-	input_dev->name = "UDD touch panel";
+	input_dev->name = "pud touch panel";
 	input_dev->id.bustype = BUS_USB;
 
 	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 	input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
 	input_dev->keybit[BIT_WORD(BTN_LEFT)] = BIT_MASK(BTN_LEFT);
 
-	/* TODO: query from device via udd protocal */
+	/* TODO: query from device via pud protocal */
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, 480, 0, 0);
 	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, 320, 0, 0);
 
@@ -144,12 +144,12 @@ int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 		INPUT_MT_DIRECT | INPUT_MT_TRACK |
 		    INPUT_MT_DROP_UNUSED);
 
-	input_set_drvdata(input_dev, udd);
+	input_set_drvdata(input_dev, pud);
 
-	input_dev->open = udd_tp_indev_open;
-	input_dev->close = udd_tp_indev_close;
+	input_dev->open = pud_tp_indev_open;
+	input_dev->close = pud_tp_indev_close;
 
-	udd->indev = input_dev;
+	pud->indev = input_dev;
 
 	rc = input_register_device(input_dev);
 	if (rc) {
@@ -157,27 +157,27 @@ int udd_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 		goto free_buf;
 	}
 
-	schedule_work(&udd->work);
+	schedule_work(&pud->work);
 	return 0;
 
 free_buf:
-	kfree(udd->ep_int_buf);
+	kfree(pud->ep_int_buf);
 free_urb:
-	usb_free_urb(udd->input_urb);
+	usb_free_urb(pud->input_urb);
 	return -1;
 }
 
-int udd_input_cleanup(struct usb_interface *intf)
+int pud_input_cleanup(struct usb_interface *intf)
 {
-	struct udd *udd = dev_get_drvdata(&intf->dev);
+	struct pud *pud = dev_get_drvdata(&intf->dev);
 
 	printk("%s\n", __func__);
-	input_unregister_device(udd->indev);
+	input_unregister_device(pud->indev);
 
-	usb_kill_urb(udd->input_urb);
-	usb_free_urb(udd->input_urb);
+	usb_kill_urb(pud->input_urb);
+	usb_free_urb(pud->input_urb);
 
-	kfree(udd->ep_int_buf);
+	kfree(pud->ep_int_buf);
 
 	return 0;
 }
