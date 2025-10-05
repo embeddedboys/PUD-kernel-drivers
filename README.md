@@ -11,14 +11,36 @@ sudo apt install git make gcc gcc-12 vim -y
 
 clone and build
 ```bash
-git clone https://github.com/embeddedboys/udd.git
-cd udd
+git clone https://github.com/embeddedboys/PUD-kernel-drivers.git
+cd PUD-kernel-drivers
 git checkout kernel-6.6
 make
-sudo insmod udd.ko
+sudo insmod pud.ko
+```
+The default display backend is DRM.
+
+upgrade WSL kernel version if needed
+```
+git clone https://github.com/microsoft/WSL2-Linux-Kernel.git --depth 1
+cd WSL2-Linux-Kernel
+make KCONFIG_CONFIG=Microsoft/config-wsl -j$(nproc)
+
+ls -lh arch/x86/boot/bzImage
 ```
 
-The default display backend is DRM.
+copy `bzImage` to your windows user dir and rename it with "kernel"
+then create and edit `.wslconfig` like this
+```
+[wsl2]
+kernel=C:\\Users\\your_username\\kernel
+```
+
+after that, stop the wsl by typing the following in Windows CMD:
+```
+wsl --shutdown
+```
+
+the new kernel will be actived the next time you start your distro
 
 ## Setup and Test Desktop
 
