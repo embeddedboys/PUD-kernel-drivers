@@ -177,7 +177,7 @@ struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
 
     vmem_size = (width * height * bpp) / BITS_PER_BYTE;
     pr_info("vmem_size: %d\n", vmem_size);
-    vmem = vzalloc(vmem_size);
+    vmem = kmalloc(vmem_size, GFP_KERNEL);
     if (!vmem) {
         pr_err("failed to allocate vmem\n");
         return NULL;
@@ -262,14 +262,14 @@ err_free_fbdefio:
 err_free_fbops:
     kfree(fbops);
 err_free_vmem:
-    vfree(vmem);
+    kfree(vmem);
     return NULL;
 }
 
 void pud_framebuffer_release(struct fb_info *info)
 {
     fb_deferred_io_cleanup(info);
-    vfree(info->screen_buffer);
+    kfree(info->screen_buffer);
     framebuffer_release(info);
 }
 

@@ -347,4 +347,3 @@ module_usb_driver(pud_drv);
 MODULE_AUTHOR("Wooden Chair <hua.zheng@embeddedboys.com>");
 MODULE_DESCRIPTION("Pico USB display DRM driver");
 MODULE_LICENSE("GPL");
-

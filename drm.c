@@ -47,7 +47,8 @@ static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
 }
 
 static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer *fb,
-                        struct drm_rect *clip, bool swap)
+                        struct drm_rect *clip, bool swap,
+			struct drm_format_conv_state *fmtcnv_state)
 {
     struct pud *pud = drm_to_pud(fb->dev);
     // struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
@@ -71,7 +72,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
     case DRM_FORMAT_XRGB8888:
         switch (pud->pixel_format) {
         case DRM_FORMAT_RGB565:
-            drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
+            drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, fmtcnv_state, swap);
             break;
         // case DRM_FORMAT_RGB888:
         //     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
@@ -90,7 +91,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
 }
 
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
-                        struct drm_rect *rect)
+                        struct drm_rect *rect, struct drm_format_conv_state *fmtcnv_state)
 {
     struct pud *pud = drm_to_pud(fb->dev);
     unsigned int height = rect->y2 - rect->y1;
@@ -101,7 +102,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
     void *tr;
 
     tr = pud->tx_buf;
-    ret = pud_buf_copy(tr, src, fb, rect, swap);
+    ret = pud_buf_copy(tr, src, fb, rect, swap, fmtcnv_state);
 
     jpeg_encode_rgb565(tr, width, height, width * height * sizeof(u16),
             pud->encoder_buf, &jpeg_length, pud->encoder_quality);
@@ -133,7 +134,8 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 
     if (drm_atomic_helper_damage_merged(old_state, state, &rect)) {
         drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n", fb->base.id, DRM_RECT_ARG(&rect));
-        pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
+        pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect,
+		    &shadow_plane_state->fmtcnv_state);
     }
 
     drm_dev_exit(idx);
@@ -257,7 +259,7 @@ static int pud_drm_dev_init_with_formats(struct pud *pud,
     // if (!pud->encoder_buf)
     //     return -ENOMEM;
 
-    pud->encoder_buf = vmalloc_32(tx_buf_size);
+    pud->encoder_buf = kmalloc(tx_buf_size, GFP_KERNEL);
     if (!pud->encoder_buf)
         return -ENOMEM;
 
@@ -374,7 +376,7 @@ int pud_drm_register(struct drm_device *drm)
         return -1;
     };
 
-    drm_fbdev_generic_setup(drm, 0);
+    drm_fbdev_dma_setup(drm, 0);
 
     return 0;
 }
@@ -389,6 +391,6 @@ void pud_drm_unregister(struct drm_device *drm)
     drm_atomic_helper_shutdown(drm);
 
     sg_free_table(&pud->bulk_sgt);
-    vfree(pud->encoder_buf);
+    kfree(pud->encoder_buf);
     pud->encoder_buf = NULL;
 }
