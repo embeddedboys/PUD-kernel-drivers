@@ -21,16 +21,9 @@ static void pud_tp_work(struct work_struct *work)
 	// u8 control_buffer[4] = {0};
 	int ret;
 
-	usb_control_msg(
-		pud->udev,
-		usb_sndctrlpipe(pud->udev, EP0_OUT_ADDR),
-		REQ_EP4_IN,
-		TYPE_VENDOR | USB_DIR_OUT,
-		0, 0,
-		NULL,
-		0,
-		pud_DEFAULT_TIMEOUT
-	);
+	usb_control_msg(pud->udev, usb_sndctrlpipe(pud->udev, EP0_OUT_ADDR),
+			REQ_EP4_IN, TYPE_VENDOR | USB_DIR_OUT, 0, 0, NULL, 0,
+			pud_DEFAULT_TIMEOUT);
 
 	ret = usb_submit_urb(urb, GFP_KERNEL);
 }
@@ -69,7 +62,6 @@ static int pud_tp_indev_open(struct input_dev *dev)
 
 static void pud_tp_indev_close(struct input_dev *dev)
 {
-
 }
 
 int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
@@ -93,13 +85,14 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	}
 
 	if (!endpoint_desc) {
-		printk("%s, device doesn't have a int endpoint for polling.\n", __func__);
+		printk("%s, device doesn't have a int endpoint for polling.\n",
+		       __func__);
 		return -ENODEV;
 	}
 
 	pud->input_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!pud->input_urb)
-	    return -ENOMEM;
+		return -ENOMEM;
 
 	pipe = usb_rcvintpipe(udev, endpoint_desc->bEndpointAddress);
 	maxp = usb_maxpacket(pud->udev, pipe);
@@ -108,16 +101,8 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!pud->ep_int_buf)
 		goto free_urb;
 
-	usb_fill_int_urb(
-		pud->input_urb,
-		udev,
-		pipe,
-		pud->ep_int_buf,
-		maxp,
-		pud_tp_urb_callback,
-		pud,
-		endpoint_desc->bInterval
-	);
+	usb_fill_int_urb(pud->input_urb, udev, pipe, pud->ep_int_buf, maxp,
+			 pud_tp_urb_callback, pud, endpoint_desc->bInterval);
 
 	INIT_WORK(&pud->work, pud_tp_work);
 
@@ -141,8 +126,8 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 
 	/* TODO: multitouch support  */
 	input_mt_init_slots(input_dev, 1,
-		INPUT_MT_DIRECT | INPUT_MT_TRACK |
-		    INPUT_MT_DROP_UNUSED);
+			    INPUT_MT_DIRECT | INPUT_MT_TRACK |
+				    INPUT_MT_DROP_UNUSED);
 
 	input_set_drvdata(input_dev, pud);
 
