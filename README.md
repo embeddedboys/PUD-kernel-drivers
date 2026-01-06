@@ -58,3 +58,16 @@ mplayer output to fbdev
 ```bash
 mplayer -vo fbdev2 -vf scale=480:320 xxx.mp4
 ```
+
+## FIXMEs:
+
+- [ ] transfer buffer is on stack
+
+```bash
+[  372.572182] pud 1-4:1.0: [drm] fb1: pud-drmdrmfb frame buffer device
+[  372.584656] ------------[ cut here ]------------
+[  372.584668] transfer buffer is on stack
+[  372.584696] WARNING: CPU: 4 PID: 203 at drivers/usb/core/hcd.c:1476 usb_hcd_map_urb_for_dma+0x463/0x4d0
+```
+
+- [ ] Part refresh
