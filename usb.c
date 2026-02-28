@@ -64,23 +64,45 @@ static void pud_usb_bulk_timeout(struct timer_list *t)
 	usb_sg_cancel(&ctx->sgr);
 }
 
+struct req_ep1_out {
+	u16 xs;
+	u16 ys;
+	u16 xe;
+	u16 ye;
+	u32 size;
+};
+static inline void pud_feed_ctrl_buf(void *buf, u16 xs, u16 ys, u16 xe, u16 ye,
+				     u32 size)
+{
+	struct req_ep1_out *req = buf;
+
+	req->xs = xs;
+	req->ys = ys;
+	req->xe = xe;
+	req->ye = ye;
+	req->size = size;
+}
+
 ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 		  size_t data_size)
 {
 	struct usb_device *udev = pud->udev;
 	struct pud_usb_bulk_context ctx;
-	int rc, actual_length;
+	// int actual_length;
+	int rc;
 
 	/* data_size must be even for RP2350 */
-	if (data_size % 2)
-		data_size += 1;
+	// if (data_size % 2)
+	// 	data_size += 1;
 
-	pud->ctrl_buf[0] = (x & 0xff);
-	pud->ctrl_buf[1] = (x >> 8);
-	pud->ctrl_buf[2] = (y & 0xff);
-	pud->ctrl_buf[3] = (y >> 8);
-	pud->ctrl_buf[4] = (data_size & 0xff);
-	pud->ctrl_buf[5] = (data_size >> 8);
+	// pud->ctrl_buf[0] = (x & 0xff);
+	// pud->ctrl_buf[1] = (x >> 8);
+	// pud->ctrl_buf[2] = (y & 0xff);
+	// pud->ctrl_buf[3] = (y >> 8);
+	// pud->ctrl_buf[4] = (data_size & 0xff);
+	// pud->ctrl_buf[5] = (data_size >> 8);
+	pud_feed_ctrl_buf(pud->ctrl_buf, x, y, pud->display->xres,
+			  pud->display->yres, data_size);
 
 	// request setup
 	rc = usb_control_msg(udev, usb_sndctrlpipe(udev, EP0_OUT_ADDR),
@@ -104,7 +126,6 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 			 pud->bulk_sgt.sgl, pud->bulk_sgt.nents, data_size,
 			 GFP_KERNEL);
 
-	/* TODO: add timeout process routine */
 	timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
 	mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(3000));
 
@@ -116,6 +137,8 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 		rc = ctx.sgr.status;
 	else if (ctx.sgr.bytes != data_size)
 		rc = -EIO;
+	else
+		rc = ctx.sgr.bytes;
 
 	destroy_timer_on_stack(&ctx.timer);
 
@@ -132,9 +155,6 @@ static int pud_read_unique_id(struct usb_interface *intf, u8 serial[],
 		pr_info("serial length should less than 8!\n");
 		return -EINVAL;
 	}
-
-	// /* Dummy read, device need to prepares data */
-	// ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
 
 	ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
 
@@ -315,7 +335,7 @@ static void pud_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_device_id pud_ids[] = { { USB_DEVICE(0x2E8A, 0x0001) },
-					  { /* KEEP THIS */ } };
+					  { /* sentinel */ } };
 MODULE_DEVICE_TABLE(usb, pud_ids);
 
 static struct usb_driver pud_drv = {
@@ -327,5 +347,5 @@ static struct usb_driver pud_drv = {
 module_usb_driver(pud_drv);
 
 MODULE_AUTHOR("Wooden Chair <hua.zheng@embeddedboys.com>");
-MODULE_DESCRIPTION("Pico USB display DRM driver");
+MODULE_DESCRIPTION("DRM driver for Pico USB Display");
 MODULE_LICENSE("GPL");
