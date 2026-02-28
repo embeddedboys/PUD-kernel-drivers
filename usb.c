@@ -269,6 +269,7 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 		return -ENOMEM;
 
 	pud = container_of(drm, struct pud, drm);
+	pud->display = &default_display;
 	pud->udev = udev;
 	pud->dev = dev;
 
