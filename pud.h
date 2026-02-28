@@ -38,7 +38,7 @@
 
 /* Whether to enable input device */
 #ifndef pud_ENABLE_INPUT_SUPPORT
-    #define pud_ENABLE_INPUT_SUPPORT    1
+    #define pud_ENABLE_INPUT_SUPPORT    0
 #endif
 
 // TODO: Currently only support less than 40000 bytes transfer
