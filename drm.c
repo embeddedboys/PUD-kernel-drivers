@@ -74,7 +74,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 		switch (pud->pixel_format) {
 		case DRM_FORMAT_RGB565:
 			drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip,
-						  fmtcnv_state, swap);
+						  fmtcnv_state);
 			break;
 			// case DRM_FORMAT_RGB888:
 			//     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
@@ -112,8 +112,8 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 			   pud->encoder_quality);
 
 	// pr_info("%s, w: %d, h: %d, len : %ld\n", __func__, width, height, jpeg_length);
-	if (jpeg_length > USB_TRANS_MAX_SIZE)
-		jpeg_length = USB_TRANS_MAX_SIZE - 1;
+	// if (jpeg_length > USB_TRANS_MAX_SIZE)
+	// 	jpeg_length = USB_TRANS_MAX_SIZE - 1;
 
 	pud_flush(pud, rect->x1, rect->y1, pud->encoder_buf, jpeg_length);
 }
@@ -140,6 +140,11 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 	if (drm_atomic_helper_damage_merged(old_state, state, &rect)) {
 		drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n",
 			fb->base.id, DRM_RECT_ARG(&rect));
+		/* FIXME: Partial refresh */
+		rect.x1 = 0;
+		rect.y1 = 0;
+		rect.x2 = fb->width;
+		rect.y2 = fb->height;
 		pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect,
 			     &shadow_plane_state->fmtcnv_state);
 	}
@@ -220,7 +225,7 @@ static const uint32_t pud_drm_formats[] = {
 };
 
 static const struct drm_display_mode pud_disp_mode = {
-	DRM_MODE_INIT(60, 480, 320, 85, 55),
+	DRM_SIMPLE_MODE(480, 320, 85, 55),
 };
 
 DEFINE_DRM_GEM_DMA_FOPS(pud_drm_fops);
@@ -244,6 +249,7 @@ static int pud_drm_dev_init_with_formats(
 	static const uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR,
 					      DRM_FORMAT_MOD_INVALID };
 	struct drm_device *drm = &pud->drm;
+	struct device *dev = drm->dev;
 	struct page **pages;
 	unsigned int i, num_pages;
 	void *ptr;
@@ -291,6 +297,8 @@ static int pud_drm_dev_init_with_formats(
 	// pud->encoder_quality = JPEGE_Q_MED;
 	pud->encoder_quality = JPEGE_Q_LOW;
 
+	/* TODO: Query resolution and format info from device */
+
 	drm_mode_copy(&pud->mode, mode);
 	pr_info("mode: %ux%u\n", pud->mode.hdisplay, pud->mode.vdisplay);
 
@@ -298,7 +306,7 @@ static int pud_drm_dev_init_with_formats(
 	rc = drm_connector_init(drm, &pud->connector, &pud_connector_funcs,
 				DRM_MODE_CONNECTOR_USB);
 	if (rc) {
-		pr_err("failed to init connector\n");
+		dev_err(dev, "failed to init connector\n");
 		return rc;
 	}
 
@@ -306,7 +314,7 @@ static int pud_drm_dev_init_with_formats(
 					  formats_count, modifiers,
 					  &pud->connector);
 	if (rc) {
-		pr_err("failed to init pipe\n");
+		dev_err(dev, "failed to init display pipe\n");
 		return rc;
 	}
 

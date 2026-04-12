@@ -59,7 +59,7 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
 
 static void pud_usb_bulk_timeout(struct timer_list *t)
 {
-	struct pud_usb_bulk_context *ctx = from_timer(ctx, t, timer);
+	struct pud_usb_bulk_context *ctx = timer_container_of(ctx, t, timer);
 
 	usb_sg_cancel(&ctx->sgr);
 }
@@ -84,7 +84,8 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 {
 	struct usb_device *udev = pud->udev;
 	struct pud_usb_bulk_context ctx;
-	int rc, actual_length;
+	// int actual_length;
+	int rc;
 
 	// pud->ctrl_buf[0] = (x & 0xff);
 	// pud->ctrl_buf[1] = (x >> 8);
@@ -117,7 +118,6 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 			 pud->bulk_sgt.sgl, pud->bulk_sgt.nents, data_size,
 			 GFP_KERNEL);
 
-	/* TODO: add timeout process routine */
 	timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
 	mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(3000));
 
@@ -129,8 +129,10 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[],
 		rc = ctx.sgr.status;
 	else if (ctx.sgr.bytes != data_size)
 		rc = -EIO;
+	else
+		rc = ctx.sgr.bytes;
 
-	destroy_timer_on_stack(&ctx.timer);
+	timer_destroy_on_stack(&ctx.timer);
 
 	return rc;
 }

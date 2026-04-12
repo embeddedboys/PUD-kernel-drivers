@@ -144,18 +144,16 @@ struct drm_gem_dma_object *drm_gem_dma_create(struct drm_device *drm,
 		return dma_obj;
 
 	if (dma_obj->map_noncoherent) {
-		dma_obj->vaddr = dma_alloc_noncoherent(drm->dev, size,
-						       &dma_obj->dma_addr,
-						       DMA_TO_DEVICE,
-						       GFP_KERNEL | __GFP_NOWARN);
+		dma_obj->vaddr = dma_alloc_noncoherent(
+			drm->dev, size, &dma_obj->dma_addr, DMA_TO_DEVICE,
+			GFP_KERNEL | __GFP_NOWARN);
 	} else {
 		dma_obj->vaddr = dma_alloc_wc(drm->dev, size,
 					      &dma_obj->dma_addr,
 					      GFP_KERNEL | __GFP_NOWARN);
 	}
 	if (!dma_obj->vaddr) {
-		drm_dbg(drm, "failed to allocate buffer with size %zu\n",
-			 size);
+		drm_dbg(drm, "failed to allocate buffer with size %zu\n", size);
 		ret = -ENOMEM;
 		goto error;
 	}
@@ -228,15 +226,16 @@ void drm_gem_dma_free(struct drm_gem_dma_object *dma_obj)
 	struct drm_gem_object *gem_obj = &dma_obj->base;
 	struct iosys_map map = IOSYS_MAP_INIT_VADDR(dma_obj->vaddr);
 
-	if (gem_obj->import_attach) {
+	if (drm_gem_is_imported(gem_obj)) {
 		if (dma_obj->vaddr)
-			dma_buf_vunmap_unlocked(gem_obj->import_attach->dmabuf, &map);
+			dma_buf_vunmap_unlocked(gem_obj->import_attach->dmabuf,
+						&map);
 		drm_prime_gem_destroy(gem_obj, dma_obj->sgt);
 	} else if (dma_obj->vaddr) {
 		if (dma_obj->map_noncoherent)
-			dma_free_noncoherent(gem_obj->dev->dev, dma_obj->base.size,
-					     dma_obj->vaddr, dma_obj->dma_addr,
-					     DMA_TO_DEVICE);
+			dma_free_noncoherent(gem_obj->dev->dev,
+					     dma_obj->base.size, dma_obj->vaddr,
+					     dma_obj->dma_addr, DMA_TO_DEVICE);
 		else
 			dma_free_wc(gem_obj->dev->dev, dma_obj->base.size,
 				    dma_obj->vaddr, dma_obj->dma_addr);
@@ -299,8 +298,7 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_dumb_create_internal);
  * Returns:
  * 0 on success or a negative error code on failure.
  */
-int drm_gem_dma_dumb_create(struct drm_file *file_priv,
-			    struct drm_device *drm,
+int drm_gem_dma_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
 			    struct drm_mode_create_dumb *args)
 {
 	struct drm_gem_dma_object *dma_obj;
@@ -354,8 +352,7 @@ unsigned long drm_gem_dma_get_unmapped_area(struct file *filp,
 
 	drm_vma_offset_lock_lookup(dev->vma_offset_manager);
 	node = drm_vma_offset_exact_lookup_locked(dev->vma_offset_manager,
-						  pgoff,
-						  len >> PAGE_SHIFT);
+						  pgoff, len >> PAGE_SHIFT);
 	if (likely(node)) {
 		obj = container_of(node, struct drm_gem_object, vma_node);
 		/*
@@ -498,8 +495,7 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_prime_import_sg_table);
  * Returns:
  * 0 on success, or a negative error code otherwise.
  */
-int drm_gem_dma_vmap(struct drm_gem_dma_object *dma_obj,
-		     struct iosys_map *map)
+int drm_gem_dma_vmap(struct drm_gem_dma_object *dma_obj, struct iosys_map *map)
 {
 	iosys_map_set_vaddr(map, dma_obj->vaddr);
 
@@ -519,7 +515,8 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_vmap);
  * Returns:
  * 0 on success or a negative error code on failure.
  */
-int drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj, struct vm_area_struct *vma)
+int drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj,
+		     struct vm_area_struct *vma)
 {
 	struct drm_gem_object *obj = &dma_obj->base;
 	int ret;
@@ -535,8 +532,8 @@ int drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj, struct vm_area_struct *
 	if (dma_obj->map_noncoherent) {
 		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 
-		ret = dma_mmap_pages(dma_obj->base.dev->dev,
-				     vma, vma->vm_end - vma->vm_start,
+		ret = dma_mmap_pages(dma_obj->base.dev->dev, vma,
+				     vma->vm_end - vma->vm_start,
 				     virt_to_page(dma_obj->vaddr));
 	} else {
 		ret = dma_mmap_wc(dma_obj->base.dev->dev, vma, dma_obj->vaddr,
@@ -600,6 +597,5 @@ drm_gem_dma_prime_import_sg_table_vmap(struct drm_device *dev,
 EXPORT_SYMBOL(drm_gem_dma_prime_import_sg_table_vmap);
 
 MODULE_DESCRIPTION("DRM DMA memory-management helpers");
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
 MODULE_LICENSE("GPL");
-

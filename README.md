@@ -1,10 +1,12 @@
+# Kernel DRM drivers for Pico USB Display device
+
 ## System Info
 
 | Distro                    | Kernel version    | Machine            |
 | ------------------------- | ----------------- | ------------------ |
-| Ubuntu 24.04.3 LTS x86_64 | 6.14.0-37-generic | ThinkPad E14 Gen 2 |
+| Ubuntu 24.04.3 LTS x86_64 | 6.17.0-20-generic | ThinkPad E14 Gen 2 |
 
-install tools
+install dependencies
 
 ```bash
 sudo apt install git make gcc vim -y
@@ -15,36 +17,18 @@ clone and build
 ```bash
 git clone https://github.com/embeddedboys/PUD-kernel-drivers.git
 cd PUD-kernel-drivers
-git checkout kernel-6.12
+git checkout 6.17.0-20-generic
 make
 sudo insmod pud.ko
 ```
 
 The default display backend is DRM.
 
-## Setup and Test Desktop
-
-### Install Desktop
-
-```bash
-sudo apt --no-install-recommends install xorg xfce4 lightdm -y
-sudo apt install dbus-x11 -y
-sudo apt install lightdm-gtk-greeter -y
-```
-
-start xfce4 with root user:
-
-```bash
-sudo startxfce4
-```
-
-start xfce4 via lightdm
-
-```bash
-sudo lightdm -d
-```
-
 ## More
+
+### Setup a Raspberrypi Pico USB Display device
+
+please refer to ...
 
 ### Useful commands during development
 
@@ -80,3 +64,4 @@ mplayer -vo fbdev2 -vf scale=480:320 xxx.mp4
 ```
 
 - [ ] Part refresh
+
