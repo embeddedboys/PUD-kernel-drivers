@@ -1,4 +1,5 @@
 #include <linux/slab.h>
+#include <linux/mm.h>
 
 #include "encoder.h"
 #include "jpegenc.h"
@@ -33,8 +34,14 @@ uint8_t *jpeg_encode_bmp(uint8_t *bmp, size_t len, size_t *out_size)
     // printk("%s, w : %d, h : %d, pitch : %d\n", __func__, w, h, pitch);
 
     buffer_size = len;
-    buffer = (uint8_t *)kmalloc(buffer_size, GFP_KERNEL);
-    bmp_tmp = (uint8_t *)kmalloc(buffer_size, GFP_KERNEL);
+    buffer = (uint8_t *)kvmalloc(buffer_size, GFP_KERNEL);
+    bmp_tmp = (uint8_t *)kvmalloc(buffer_size, GFP_KERNEL);
+    if (!buffer || !bmp_tmp) {
+        printk("%s: failed to allocate buffers\n", __func__);
+        kvfree(buffer);
+        kvfree(bmp_tmp);
+        return NULL;
+    }
 
     dst = bmp_tmp;
     src = &bmp[offset];
@@ -65,7 +72,7 @@ uint8_t *jpeg_encode_bmp(uint8_t *bmp, size_t len, size_t *out_size)
     // printk("%s, jpeg size : %d\n", __func__, jpeg.iDataSize);
     *out_size = jpeg.iDataSize;
 
-    kfree(bmp_tmp);
+    kvfree(bmp_tmp);
 
     return buffer;
 }
@@ -100,4 +107,21 @@ int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len, uint8_t *work_
     *out_size = jpeg.iDataSize;
 
     return rc;
+}
+
+int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
+                      uint8_t *work_buf, size_t *out_size)
+{
+    size_t sz;
+
+    if (!rgb565 || !work_buf || !w || !h || !out_size)
+        return -EINVAL;
+
+    sz = rgb565_qoi_compress((const uint16_t *)rgb565, (size_t)w * h,
+                             work_buf, work_size);
+    if (sz == 0)
+        return -ENOSPC;
+
+    *out_size = sz;
+    return 0;
 }

@@ -1,0 +1,275 @@
+# 踩坑合集
+
+按主题分组。每条都是**实际发生过**的问题，附带现象、根因、修法。
+
+---
+
+## 一、DMA 与内存
+
+### 1.1 `transfer buffer is on stack`（内核 WARN）
+
+**现象**：`insmod` 时 dmesg 出现
+
+```
+WARNING: CPU: ... at drivers/usb/core/hcd.c:1503 usb_hcd_map_urb_for_dma+0x...
+transfer buffer is on stack
+```
+
+**出处**（`drivers/usb/core/hcd.c:1502`）：
+
+```c
+} else if (object_is_on_stack(urb->transfer_buffer)) {
+        WARN_ONCE(1, "transfer buffer is on stack\n");
+        ret = -EAGAIN;
+}
+```
+
+要看懂它，得知道进入这一行的条件链（同一个 `if/else if` 链，必须全部满足）：
+
+| # | 条件 | 说明 |
+| --- | --- | --- |
+| 1 | `urb->transfer_buffer_length != 0` | 有数据阶段；纯控制请求传 `NULL, 0` 不会进来 |
+| 2 | 未设 `URB_NO_TRANSFER_DMA_MAP` | 没有自己提供 DMA 地址 |
+| 3 | `hcd->localmem_pool == NULL` | xhci 不设 localmem_pool |
+| 4 | `hcd_uses_dma(hcd)` | `CONFIG_HAS_DMA && (hcd->driver->flags & HCD_DMA)` |
+| 5 | `num_sgs == 0 && sg == NULL` | 线性 buffer，而非 SG 表 |
+| 6 | `object_is_on_stack(transfer_buffer)` | ← **就是这条** |
+
+第 4 条确认：`drivers/usb/host/xhci.c:5504` 里 `.flags = HCD_MEMORY | HCD_DMA | HCD_USB3 | ...`，
+板子上的 Pico 挂在 `fc400000.usb`（xhci-hcd），所以这个检查**生效**。
+
+另外注意执行顺序 —— `usb_hcd_submit_urb()` 中映射在入队**之前**：
+
+```
+status = map_urb_for_dma(hcd, urb, mem_flags);      /* 这里 WARN */
+...
+status = hcd->driver->urb_enqueue(hcd, urb, mem_flags);
+```
+
+所以控制器**根本没看到这个 URB**，传输完全没发生，`usb_submit_urb()` 返回 `-EAGAIN`。
+
+**本项目的历史现场**：`pud_probe()` 里
+
+```c
+u8 serial[8];                                      /* ← 栈上 */
+pud_read_unique_id(intf, serial, ARRAY_SIZE(serial));
+pr_info("sn : 0x%02x...", serial[0], ...);
+```
+
+`pud_read_unique_id()` → `pud_transfer()` → `usb_bulk_msg(..., (void *)data, ...)`，
+`data` 就是那个栈数组。
+
+**当时的可见症状**：`usb_start_wait_urb()` 拿到 `-EAGAIN` 后 `goto out`，
+把 `*actual_length` 置 0 返回；`serial[]` 从未被设备写过，
+于是 `pr_info` 打印出**内核栈残留字节**（每次启动都不同，且是一次内核栈信息泄漏）。
+因为是 `WARN_ONCE`，每次启动只打印一次 —— 重启后不再出现 ≠ 问题消失。
+
+**修法**：改用堆内存。
+
+```c
+u8 *serial = kzalloc(8, GFP_KERNEL);
+if (!serial) return -ENOMEM;
+...
+kfree(serial);
+```
+
+**为什么必须拒绝（不是内核洁癖）**：
+- `dma_map_single()` 假设指针在直接映射区（`virt_addr_valid`）；
+- 本板 `CONFIG_VMAP_STACK=y`，内核栈在 vmalloc 空间，所以**同时**会命中 1.2 的检查；
+  USB 核心先查 `object_is_on_stack()`，给了更明确的提示；
+- 栈是普通可缓存映射，DMA 一致性假设被打破；
+- 异步 URB 提交后调用者立即返回，栈帧随时可能被复用；
+- `object_is_on_stack()` 只对比 **`current`** 的栈（`include/linux/sched/task_stack.h:90`），
+  **跨上下文提交的栈 buffer 检测不到** —— 所以内核选择直接失败而不是赌。
+
+### 1.2 `rejecting DMA map of vmalloc memory`
+
+**出处**（`include/linux/dma-mapping.h:332`）：
+
+```c
+if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
+                  "rejecting DMA map of vmalloc memory\n"))
+        return DMA_MAPPING_ERROR;
+```
+
+**现场**：`pud->tx_buf` / `pud->encoder_buf` 最初用 `kmalloc` 分配（显示分辨率较大时
+直接 "page allocation failure: order:7"），改成 `vmalloc` 之后又撞上这条 ——
+`encoder_buf` 要作为 `usb_sg` 的 DMA 源。
+
+**修法**：区分用途。
+- `tx_buf` 只给 CPU 读写 → `vmalloc` 没问题；
+- `encoder_buf` 要被 DMA 读 → 必须 `dma_alloc_coherent`，
+  再用 `vmalloc_to_page()` 取底层页组 SG 表。
+
+**通用规则**：交给 `usb_submit_urb` / `usb_control_msg` / `usb_bulk_msg` /
+`usb_interrupt_msg` / `usb_fill_*_urb` / `usb_sg_init` 的 buffer 必须是：
+
+- ✅ `kmalloc`/`kzalloc`/`kvmalloc`/`__get_free_pages`/`dma_alloc_coherent`，或由这类内存组成的 SGL
+- ❌ 栈（`object_is_on_stack`）
+- ❌ vmalloc/vmap（`is_vmalloc_addr`）
+- ⚠️ 或者设 `URB_NO_TRANSFER_DMA_MAP` 并自己填 `transfer_dma`
+
+### 1.3 本驱动所有 USB 传输 buffer 的来源（自查表）
+
+改动涉及 USB 传输时应回归这张表：
+
+| 位置 | 通道 | buffer | 结论 |
+| --- | --- | --- | --- |
+| `pud_transfer()` EP0 | control OUT | `pud->ctrl_buf`（嵌在 `struct pud`，`devm_drm_dev_alloc` → 堆） | ✅ |
+| `pud_transfer()` EP2 | bulk IN | 调用者传入（`pud_read_unique_id` → `kzalloc(8)`） | ✅ |
+| `pud_flush()` EP0 | control OUT | `pud->ctrl_buf` | ✅ |
+| `pud_flush()` EP1 | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
+| `input.c` REQ_EP4_IN | control OUT | `NULL, 0` → 条件 1 不成立，DMA 分支跳过 | ✅ |
+| `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kmalloc` | ✅ |
+
+**容易误判的一处**：`pud_flush()` 里
+
+```c
+struct pud_usb_bulk_context ctx;   /* 含 usb_sg_request + timer_list，确实在栈上 */
+```
+
+看着像同类错误，但其**是描述符不是传输 buffer**：`usb_sg_init()` 内部自己
+`usb_alloc_urb()`，URB 的 buffer 指向 SGL 里的 coherent 内存；
+`timer_setup_on_stack()`/`destroy_timer_on_stack()` 也是短生命周期 timer 的官方用法。
+**不要"顺手"改成堆分配**（栈上 timer 是刻意避免 kmalloc 失败路径）。
+
+### 1.4 swiotlb "buffer is full"
+
+**现象**：大量 `swiotlb buffer is full (sz: 4)`，伴随 gnome-shell 卡顿。
+
+**根因**：接口的流式 DMA mask 只有 32 位，超出范围的 buffer 要走 swiotlb bounce buffer，
+高刷新率下把 bounce 池打爆。
+
+**修法**：把**流式** DMA mask 提到 64 位，coherent 保持 32 位：
+
+```c
+/* streaming: 64-bit, coherent: 32-bit */
+```
+
+### 1.5 `order:7` 页分配失败
+
+`kmalloc` 一次要 128KB 连续物理页（order 7）在系统跑起来后基本会失败。
+大块缓冲一律 `vmalloc`（CPU 用）或 `dma_alloc_coherent`（DMA 用），不要 `kmalloc`。
+
+---
+
+## 二、USB 传输细节
+
+### 2.1 `pud_transfer()` 的返回值可能未初始化（**未修**）
+
+```c
+int rc, actual_length;                 /* actual_length 未初始化 */
+...
+rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length, pud_DEFAULT_TIMEOUT);
+return actual_length;                  /* ← 可能是栈上垃圾值 */
+```
+
+因为 `usb_bulk_msg()`（`drivers/usb/core/message.c`）有两条**提前返回且不写
+`*actual_length`** 的路径：
+
+```c
+ep = usb_pipe_endpoint(usb_dev, pipe);
+if (!ep || len < 0)
+        return -EINVAL;                /* *actual_length 未赋值 */
+urb = usb_alloc_urb(0, GFP_KERNEL);
+if (!urb)
+        return -ENOMEM;                /* *actual_length 未赋值 */
+```
+
+另外两次调用的 `rc` 都被丢弃：EP0 控制请求失败时照样会去发 bulk。
+
+**建议改法**：
+
+```c
+int rc, actual_length = 0;
+
+rc = usb_control_msg(...);
+if (rc < 0)
+    return rc;
+
+rc = usb_bulk_msg(udev, pipe, data, len, &actual_length, pud_DEFAULT_TIMEOUT);
+return rc < 0 ? rc : actual_length;
+```
+
+并且 `pud_read_unique_id()` 的返回值应被 `pud_probe()` 检查 ——
+现在被直接忽略，读失败时只会打印 8 个 `0x00` 而毫无提示。
+
+### 2.2 `pud_flush()` 里未检查的 EP0 控制请求（已修）
+
+控制请求失败却继续发 payload，设备会用**上一个矩形窗口**去画新数据。
+现在失败即返回：
+
+```c
+rc = usb_control_msg(...);
+if (rc < 0)
+    return rc;
+```
+
+### 2.3 协议层的两处不一致
+
+`usb_control_msg(..., sizeof(pud->ctrl_buf) /* 16 */, ...)` 但 `struct req_ep1_out` 只有
+12 字节；`size` 还会被 `pud_flush()` 向上取偶加 1。
+细节见 [usb-protocol.md](usb-protocol.md) 的"已知不一致"两节 —— 目前无害但脆。
+
+---
+
+## 三、DRM / 显示接口
+
+### 3.1 `IS_ERR()` 而不是 `!ptr`
+
+`pud_drm_alloc()` 失败返回 `ERR_PTR(-ENOMEM)`，调用方写成 `if (!drm)` 会把错误指针
+当有效设备用 → `insmod` 时 SIGSEGV / oops（现场：`pud_probe+0x80`）。必须 `IS_ERR()`。
+
+### 3.2 6.1 与 6.12 的 API 差异
+
+| 6.12 | 6.1 |
+| --- | --- |
+| `drm/drm_fbdev_dma.h` | `drm/drm_fb_helper.h` |
+| `drm_fbdev_dma_setup()` | `drm_fbdev_generic_setup()` |
+| `drm_fb_xrgb8888_to_rgb565(..., fmtcnv_state)` | 少一个参数 |
+| `drm_shadow_plane_state.fmtcnv_state` | 不存在 |
+| 自定义 pipe 回调 | `DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS` |
+
+### 3.3 `Format is not supported: RG16 little-endian (0x36314752)`
+
+`drm_fb_memcpy()` 的默认分支不认 `DRM_FORMAT_RGB565`。合成器（以及 16bpp 的 fbdev 模拟）
+会把 RGB565 的 fb 交上来，所以 `pud_buf_copy()` **必须**显式处理这个 case：
+
+```c
+case DRM_FORMAT_RGB565:
+    drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
+    break;
+```
+
+### 3.4 gnome-shell 不点亮面板 / monitors.xml
+
+合成器把连接器名字记在 `~/.config/monitors.xml`。Pico 换 USB 端口或重新枚举后，
+连接器名可能从 `USB-1` 变成别的（曾出现记录的 `Unknown20-1` 与实际 `USB-1` 不符），
+于是 gnome-shell 认为"这个显示器不在配置里"而不点亮。
+
+**修法**：删掉 `monitors.xml` 并重启会话，让它重新探测。
+
+### 3.5 局部刷新有残影 ≠ 驱动问题
+
+一次真实误判：局部刷新残影的根因在**固件丢帧**（帧槽满时静默丢帧），
+驱动侧无需改动。排查顺序见 [display-and-refresh.md](display-and-refresh.md)
+最后一节。
+
+---
+
+## 四、模块生命周期
+
+### 4.1 `disagrees about version of symbol module_layout`
+
+模块 `vermagic` 与运行内核不一致。必须用**运行内核**的 headers/objtree 编译。
+`modinfo pud.ko | grep vermagic` 与 `uname -r` 对照。
+
+### 4.2 `rmmod` 失败、refcnt 只增不减
+
+`refcnt` 会被 gnome-shell 持有的 `/dev/dri/cardN` fd 抬高（曾涨到 32）。
+**可靠的重置手段是重启开发板**；`systemctl stop gdm`、解绑 vtconsole 不一定管用。
+
+### 4.3 修改内核源码树的诱惑
+
+构建 6.1.118 时需要用 `KERN_OBJ_DIR` 指向 objtree，而不是去 `KERN_DIR` 里补文件。
+**`KERN_DIR` 只读**。

@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/fb.h>
 #include <linux/usb.h>
 #include <linux/usb/input.h>
@@ -28,11 +29,6 @@
 
 #define DRV_NAME "pud"
 
-struct pud_usb_bulk_context {
-    struct timer_list timer;
-    struct usb_sg_request sgr;
-};
-
 static int pud_transfer(struct pud *pud, u8 cmd, u8 request,
                         u8 addr, u8 *data, size_t len)
 {
@@ -40,9 +36,10 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request,
     int rc, actual_length;
     int pipe;
 
-    pud->ctrl_buf[0] = cmd;
-    pud->ctrl_buf[1] = len & 0xff;
-    pud->ctrl_buf[2] = len >> 8;
+    pud->ctrl_buf[0] = cmd & 0xff;
+    pud->ctrl_buf[1] = (cmd >> 8) & 0xff;
+    pud->ctrl_buf[2] = len & 0xff;
+    pud->ctrl_buf[3] = (len >> 8) & 0xff;
 
     rc = usb_control_msg(
         udev,
@@ -70,6 +67,11 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request,
     return actual_length;
 }
 
+struct pud_usb_bulk_context {
+    struct timer_list timer;
+    struct usb_sg_request sgr;
+};
+
 static void pud_usb_bulk_timeout(struct timer_list *t)
 {
     struct pud_usb_bulk_context *ctx = from_timer(ctx, t, timer);
@@ -77,22 +79,41 @@ static void pud_usb_bulk_timeout(struct timer_list *t)
     usb_sg_cancel(&ctx->sgr);
 }
 
-ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[], size_t data_size)
+struct req_ep1_out {
+    u16 xs;
+    u16 ys;
+    u16 xe;
+    u16 ye;
+    u32 size;
+};
+
+static inline void pud_feed_ctrl_buf(void *buf, u16 xs, u16 ys, u16 xe, u16 ye,
+                                     u32 size)
+{
+    struct req_ep1_out *req = buf;
+
+    req->xs = xs;
+    req->ys = ys;
+    req->xe = xe;
+    req->ye = ye;
+    req->size = size;
+}
+
+ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
+                  const u8 jpeg_data[], size_t data_size)
 {
     struct usb_device *udev = pud->udev;
     struct pud_usb_bulk_context ctx;
-    int rc, actual_length;
+    int rc;
 
     /* data_size must be even for RP2350 */
     if (data_size % 2)
         data_size += 1;
 
-    pud->ctrl_buf[0] = (x & 0xff);
-    pud->ctrl_buf[1] = (x >> 8);
-    pud->ctrl_buf[2] = (y & 0xff);
-    pud->ctrl_buf[3] = (y >> 8);
-    pud->ctrl_buf[4] = (data_size & 0xff);
-    pud->ctrl_buf[5] = (data_size >> 8);
+    if (data_size > pud->encoder_buf_size)
+        data_size = pud->encoder_buf_size;
+
+    pud_feed_ctrl_buf(pud->ctrl_buf, x, y, xe, ye, data_size);
 
     // request setup
     rc = usb_control_msg(
@@ -106,21 +127,19 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[], size_t da
         pud_DEFAULT_TIMEOUT
     );
 
-    // rc = usb_bulk_msg(
-    //     udev,
-    //     usb_sndbulkpipe(udev, EP1_OUT_ADDR),
-    //     (void *)jpeg_data,
-    //     data_size,
-    //     &actual_length,
-    //     pud_DEFAULT_TIMEOUT
-    // );
+    /* Without a successful window request the device would still use the
+     * previous rectangle, so do not send the payload at all. */
+    if (rc < 0)
+        return rc;
 
-    // return actual_length;
+    /* Move the frame into the DMA buffer before the SG bulk send */
+    if (jpeg_data != pud->encoder_buf)
+        memcpy(pud->encoder_buf, jpeg_data, data_size);
 
     rc = usb_sg_init(&ctx.sgr, pud->udev, usb_sndbulkpipe(udev, EP1_OUT_ADDR), 0,
                     pud->bulk_sgt.sgl, pud->bulk_sgt.nents, data_size, GFP_KERNEL);
 
-    /* TODO: add timeout process routine */
+    /* timeout routine in case the device stops reading */
     timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
     mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(3000));
 
@@ -132,6 +151,8 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[], size_t da
         rc = ctx.sgr.status;
     else if (ctx.sgr.bytes != data_size)
         rc = -EIO;
+    else
+        rc = ctx.sgr.bytes;
 
     destroy_timer_on_stack(&ctx.timer);
 
@@ -162,9 +183,12 @@ static int pud_bmp_blit(struct pud *pud, uint8_t *bmp, size_t len)
     ssize_t jpeg_length = 0, actual_length = 0;
 
     jpeg_data = jpeg_encode_bmp(bmp, len, &jpeg_length);
-    actual_length = pud_flush(pud, 0, 0, jpeg_data, jpeg_length);
+    if (!jpeg_data)
+        return -1;
+    actual_length = pud_flush(pud, 0, 0, pud->display->xres - 1,
+                              pud->display->yres - 1, jpeg_data, jpeg_length);
 
-    kfree(jpeg_data);
+    kvfree(jpeg_data);
 
     if (actual_length != jpeg_length) {
         dev_warn(pud->dev, "Failed to blit bmp data");
@@ -211,13 +235,17 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
         return -ENOMEM;
 
     pud = info->par;
+    pud->display = &default_display;
     pud->udev = udev;
     pud->dev = dev;
     pud->info = info;
 
-    pud->encoder_buf = devm_kmalloc(pud->dev, info->var.xres * info->var.yres * 2, GFP_KERNEL);
+    pud->encoder_buf = dma_alloc_coherent(pud->dev,
+                        info->var.xres * info->var.yres * 2,
+                        &pud->encoder_dma, GFP_KERNEL);
     if (!pud->encoder_buf)
         return -ENOMEM;
+    pud->encoder_buf_size = info->var.xres * info->var.yres * 2;
 
     pud->encoder_quality = JPEGE_Q_LOW;
 
@@ -243,6 +271,12 @@ static void __maybe_unused pud_fb_cleanup(struct usb_interface *intf)
 
     pud_unregister_framebuffer(pud->info);
     pud_framebuffer_release(pud->info);
+    if (pud->encoder_buf) {
+        dma_free_coherent(pud->dev, pud->encoder_buf_size,
+                          pud->encoder_buf, pud->encoder_dma);
+        pud->encoder_buf = NULL;
+        pud->encoder_buf_size = 0;
+    }
 }
 
 static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
@@ -259,10 +293,11 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
     printk("\n\n%s\n", __func__);
 
     drm = pud_drm_alloc(dev);
-    if (!drm)
-        return -ENOMEM;
+    if (IS_ERR(drm))
+        return PTR_ERR(drm);
 
     pud = container_of(drm, struct pud, drm);
+    pud->display = &default_display;
     pud->udev = udev;
     pud->dev = dev;
 
@@ -291,15 +326,23 @@ static void __maybe_unused pud_drm_cleanup(struct usb_interface *intf)
 static int pud_probe(struct usb_interface *intf,
                     const struct usb_device_id *id)
 {
-    u8 serial[8];
+    u8 *serial;
+    int rc;
+
+    /* usb_bulk_msg() needs a DMA-mappable buffer, not a stack one */
+    serial = kzalloc(8, GFP_KERNEL);
+    if (!serial)
+        return -ENOMEM;
 
 #if pud_DEF_DISP_BACKEND == pud_DISP_BACKEND_FBDEV
-    pud_fb_steup(intf, id);
+    rc = pud_fb_steup(intf, id);
 #else
-    pud_drm_setup(intf, id);
+    rc = pud_drm_setup(intf, id);
 #endif
+    if (rc)
+        goto out_free_serial;
 
-    pud_read_unique_id(intf, serial, ARRAY_SIZE(serial));
+    pud_read_unique_id(intf, serial, 8);
 
     pr_info("sn : 0x%02x%02x%02x%02x%02x%02x%02x%02x\n", serial[0], serial[1],
                                                         serial[2], serial[3],
@@ -310,7 +353,10 @@ static int pud_probe(struct usb_interface *intf,
     pud_input_setup(intf, id);
 #endif
 
-    return 0;
+    rc = 0;
+out_free_serial:
+    kfree(serial);
+    return rc;
 }
 
 static void pud_disconnect(struct usb_interface *intf)

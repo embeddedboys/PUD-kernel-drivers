@@ -17,7 +17,7 @@
 #include <drm/drm_device.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_framebuffer.h>
-#include <drm/drm_fbdev_dma.h>
+#include <drm/drm_fb_helper.h>
 #include <drm/drm_probe_helper.h>
 
 #include <drm/drm_format_helper.h>
@@ -84,12 +84,17 @@ struct pud {
 
     /* Encoder data */
     u8 *encoder_buf;
+    dma_addr_t encoder_dma;
+    size_t encoder_buf_size;
     u8 encoder_quality;
 
     /* DRM specific data */
     u16 *tx_buf;
     struct sg_table bulk_sgt;
     u32 pixel_format;
+    /* Set when a flush fails: that damage rectangle is lost, so the next
+     * update repaints the whole screen to clear any stale region. */
+    bool needs_full_refresh;
     struct drm_device drm;
     struct drm_simple_display_pipe pipe;
     struct drm_connector connector;
@@ -117,6 +122,7 @@ void pud_drm_unregister(struct drm_device *drm);
 int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id);
 int pud_input_cleanup(struct usb_interface *intf);
 
-ssize_t pud_flush(struct pud *pud, u16 x, u16 y, const u8 jpeg_data[], size_t data_size);
+ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
+                  const u8 jpeg_data[], size_t data_size);
 
 #endif

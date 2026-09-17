@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 #include <linux/fb.h>
 
 #include "pud.h"
@@ -155,7 +156,8 @@ static void pud_fb_deferred_io(struct fb_info *info, struct list_head *pagerefli
     if (jpeg_length > USB_TRANS_MAX_SIZE)
         jpeg_length = USB_TRANS_MAX_SIZE - 1;
 
-    pud_flush(pud, 0, 0, pud->encoder_buf, jpeg_length);
+    pud_flush(pud, 0, 0, info->var.xres - 1, info->var.yres - 1,
+              pud->encoder_buf, jpeg_length);
 }
 
 struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
@@ -177,7 +179,7 @@ struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
 
     vmem_size = (width * height * bpp) / BITS_PER_BYTE;
     pr_info("vmem_size: %d\n", vmem_size);
-    vmem = kmalloc(vmem_size, GFP_KERNEL);
+    vmem = vmalloc(vmem_size);
     if (!vmem) {
         pr_err("failed to allocate vmem\n");
         return NULL;
@@ -269,7 +271,7 @@ err_free_vmem:
 void pud_framebuffer_release(struct fb_info *info)
 {
     fb_deferred_io_cleanup(info);
-    kfree(info->screen_buffer);
+    vfree(info->screen_buffer);
     framebuffer_release(info);
 }
 

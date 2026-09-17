@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 #include <video/mipi_display.h>
 
 #include "pud.h"
@@ -47,8 +48,7 @@ static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
 }
 
 static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer *fb,
-                        struct drm_rect *clip, bool swap,
-			struct drm_format_conv_state *fmtcnv_state)
+                        struct drm_rect *clip, bool swap)
 {
     struct pud *pud = drm_to_pud(fb->dev);
     // struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
@@ -60,19 +60,20 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
         return ret;
 
     switch (fb->format->format) {
-    // case DRM_FORMAT_RGB565:
-    //     if (swap)
-    //         drm_fb_swab(&dst_map, NULL, src, fb, clip, !gem->import_attach);
-    //     else
-    //         drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
-    //     break;
+    case DRM_FORMAT_RGB565:
+        /* Already in the panel's native format: copy the block straight
+         * across. Compositors (and the 16bpp fbdev emulation) hand us RGB565
+         * buffers, so this path must not error out.
+         */
+        drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
+        break;
     // case DRM_FORMAT_RGB888:
     //     drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
     //     break;
     case DRM_FORMAT_XRGB8888:
         switch (pud->pixel_format) {
         case DRM_FORMAT_RGB565:
-            drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, fmtcnv_state, swap);
+            drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
             break;
         // case DRM_FORMAT_RGB888:
         //     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
@@ -90,28 +91,76 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
     return ret;
 }
 
+/*
+ * Frame encoding / refresh policy.
+ *
+ * Frames are encoded with RGB565 QOI (lossless, very fast to encode and
+ * decode) instead of JPEG. The firmware's QOI decoder handles arbitrary
+ * partial windows correctly (it decodes pixel by pixel, unlike the JPEGDEC
+ * path whose MCU/crop logic mis-clips a sub-image decoded at x != 0 and could
+ * wedge the display under load). So the damage rectangle is sent as-is:
+ * small, lossless and fast.
+ *
+ * A rectangle whose QOI stream might not fit the USB transfer limit is split
+ * into horizontal bands and each band is encoded and flushed on its own. The
+ * QOI worst case is 3 bytes per pixel, so a band of at most
+ * PUD_MAX_BAND_PIXELS pixels always fits.
+ */
+#define PUD_MAX_BAND_PIXELS ((USB_TRANS_MAX_SIZE - 16) / 3)
+
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
-                        struct drm_rect *rect, struct drm_format_conv_state *fmtcnv_state)
+                         struct drm_rect *rect)
 {
     struct pud *pud = drm_to_pud(fb->dev);
-    unsigned int height = rect->y2 - rect->y1;
-    unsigned int width = rect->x2 - rect->x1;
-    ssize_t jpeg_length = 0;
+    struct drm_rect band;
+    unsigned int rows, y;
     bool swap = false;
-    int ret = 0;
-    void *tr;
+    ssize_t qoi_length;
+    int ret;
 
-    tr = pud->tx_buf;
-    ret = pud_buf_copy(tr, src, fb, rect, swap, fmtcnv_state);
+    if (rect->x2 <= rect->x1 || rect->y2 <= rect->y1)
+        return;
 
-    jpeg_encode_rgb565(tr, width, height, width * height * sizeof(u16),
-            pud->encoder_buf, &jpeg_length, pud->encoder_quality);
+    rows = PUD_MAX_BAND_PIXELS / (rect->x2 - rect->x1);
+    if (rows < 1)
+        rows = 1;
 
-    // pr_info("%s, w: %d, h: %d, len : %ld\n", __func__, width, height, jpeg_length);
-    if (jpeg_length > USB_TRANS_MAX_SIZE)
-        jpeg_length = USB_TRANS_MAX_SIZE - 1;
+    for (y = rect->y1; y < rect->y2; y += rows) {
+        unsigned int width, height;
 
-    pud_flush(pud, rect->x1, rect->y1, pud->encoder_buf, jpeg_length);
+        band.x1 = rect->x1;
+        band.x2 = rect->x2;
+        band.y1 = y;
+        band.y2 = min(y + rows, (unsigned int)rect->y2);
+
+        width = band.x2 - band.x1;
+        height = band.y2 - band.y1;
+
+        ret = pud_buf_copy(pud->tx_buf, src, fb, &band, swap);
+        if (ret)
+            return;
+
+        qoi_length = 0;
+        ret = qoi_encode_rgb565((uint8_t *)pud->tx_buf, width, height,
+                                pud->encoder_buf_size, pud->encoder_buf,
+                                &qoi_length);
+        if (ret) {
+            drm_err_once(fb->dev, "QOI encode failed: %d\n", ret);
+            pud->needs_full_refresh = true;
+            return;
+        }
+
+        ret = pud_flush(pud, band.x1, band.y1, band.x2 - 1, band.y2 - 1,
+                        pud->encoder_buf, qoi_length);
+        if (ret < 0) {
+            /* The frame did not reach the display: those pixels would stay
+             * stale until the application happens to redraw them. Ask for a
+             * full repaint on the next update instead. */
+            drm_dbg(fb->dev, "flush failed: %d\n", ret);
+            pud->needs_full_refresh = true;
+            return;
+        }
+    }
 }
 
 static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
@@ -121,6 +170,7 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
     struct drm_shadow_plane_state *shadow_plane_state = to_drm_shadow_plane_state(state);
     struct drm_framebuffer *fb = state->fb;
     struct drm_rect rect;
+    struct pud *pud;
     int idx;
 
     if (!pipe->crtc.state->active)
@@ -129,44 +179,24 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
     if (WARN_ON(!fb))
         return;
 
+    pud = drm_to_pud(fb->dev);
+
     if (!drm_dev_enter(fb->dev, &idx))
         return;
 
-    if (drm_atomic_helper_damage_merged(old_state, state, &rect)) {
+    if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
+        pud->needs_full_refresh) {
+        if (pud->needs_full_refresh) {
+            /* A previous flush was lost; repaint everything so no stale
+             * pixels survive. */
+            pud->needs_full_refresh = false;
+            drm_rect_init(&rect, 0, 0, fb->width, fb->height);
+        }
         drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n", fb->base.id, DRM_RECT_ARG(&rect));
-        pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect,
-		    &shadow_plane_state->fmtcnv_state);
+        pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
     }
 
     drm_dev_exit(idx);
-}
-
-static int pud_drm_pipe_begin_fb_access(struct drm_simple_display_pipe *pipe,
-				  struct drm_plane_state *plane_state)
-{
-    return drm_gem_begin_shadow_fb_access(&pipe->plane, plane_state);
-}
-
-static void pud_drm_pipe_end_fb_access(struct drm_simple_display_pipe *pipe,
-				 struct drm_plane_state *plane_state)
-{
-	drm_gem_end_shadow_fb_access(&pipe->plane, plane_state);
-}
-
-static void pud_drm_pipe_reset_plane(struct drm_simple_display_pipe *pipe)
-{
-	drm_gem_reset_shadow_plane(&pipe->plane);
-}
-
-static struct drm_plane_state *pud_drm_pipe_duplicate_plane_state(struct drm_simple_display_pipe *pipe)
-{
-	return drm_gem_duplicate_shadow_plane_state(&pipe->plane);
-}
-
-static void pud_drm_pipe_destroy_plane_state(struct drm_simple_display_pipe *pipe,
-				       struct drm_plane_state *plane_state)
-{
-	drm_gem_destroy_shadow_plane_state(&pipe->plane, plane_state);
 }
 
 static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
@@ -174,11 +204,7 @@ static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
     .enable = pud_drm_pipe_enable,
     .disable = pud_drm_pipe_disable,
     .update = pud_drm_pipe_update,
-    .begin_fb_access = pud_drm_pipe_begin_fb_access,
-    .end_fb_access = pud_drm_pipe_end_fb_access,
-    .reset_plane = pud_drm_pipe_reset_plane,
-    .duplicate_plane_state = pud_drm_pipe_duplicate_plane_state,
-    .destroy_plane_state = pud_drm_pipe_destroy_plane_state,
+    DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
 };
 
 static int pud_connector_get_modes(struct drm_connector *connector)
@@ -240,6 +266,7 @@ static int pud_drm_dev_init_with_formats(struct pud *pud,
     struct drm_device *drm = &pud->drm;
     struct page **pages;
     unsigned int i, num_pages;
+    size_t enc_size;
     void *ptr;
     int rc;
 
@@ -251,32 +278,42 @@ static int pud_drm_dev_init_with_formats(struct pud *pud,
         return rc;
     }
 
-    pud->tx_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
+    pud->tx_buf = vmalloc(tx_buf_size);
     if (!pud->tx_buf)
         return -ENOMEM;
 
-    // pud->encoder_buf = devm_kmalloc(drm->dev, tx_buf_size, GFP_KERNEL);
-    // if (!pud->encoder_buf)
-    //     return -ENOMEM;
-
-    pud->encoder_buf = kmalloc(tx_buf_size, GFP_KERNEL);
+    /* The encoder output buffer is DMA-allocated so its pages are within the
+     * USB controller's DMA range: the bulk SG transfer can map them directly
+     * (no swiotlb bounce). dma_alloc_coherent() returns a vmap address for
+     * the CPU encoder to write to; the underlying pages are obtained with
+     * vmalloc_to_page() for the SG list.
+     *
+     * It must hold the worst-case QOI stream for a full frame
+     * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
+     */
+    enc_size = rgb565_qoi_max_compressed_size((size_t)mode->hdisplay *
+                                              mode->vdisplay);
+    if (!enc_size)
+        return -EINVAL;
+    pud->encoder_buf = dma_alloc_coherent(drm->dev, enc_size,
+                                          &pud->encoder_dma, GFP_KERNEL);
     if (!pud->encoder_buf)
         return -ENOMEM;
+    pud->encoder_buf_size = enc_size;
 
-    num_pages = DIV_ROUND_UP(tx_buf_size, PAGE_SIZE);
+    num_pages = DIV_ROUND_UP(enc_size, PAGE_SIZE);
     pages = kmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
     if (!pages)
         return -ENOMEM;
-
-    DRM_DEBUG_KMS("%s, %d\n", __func__, num_pages);
 
     for (i = 0, ptr = pud->encoder_buf; i < num_pages; i++, ptr += PAGE_SIZE)
         pages[i] = vmalloc_to_page(ptr);
 
     rc = sg_alloc_table_from_pages(&pud->bulk_sgt, pages, num_pages,
-                            0, tx_buf_size, GFP_KERNEL);
-
+                            0, enc_size, GFP_KERNEL);
     kfree(pages);
+    if (rc)
+        return rc;
 
     /* TODO: use debugfs to set params */
     // pud->encoder_quality = JPEGE_Q_BEST;
@@ -329,6 +366,21 @@ static int pud_drm_dev_init(struct pud *pud,
                         ARRAY_SIZE(pud_drm_formats), mode, bufsize);
 }
 
+static void pud_drm_release_buffers(struct pud *pud)
+{
+    sg_free_table(&pud->bulk_sgt);
+    if (pud->encoder_buf) {
+        dma_free_coherent(pud->drm.dev, pud->encoder_buf_size,
+                          pud->encoder_buf, pud->encoder_dma);
+        pud->encoder_buf = NULL;
+        pud->encoder_buf_size = 0;
+    }
+    if (pud->tx_buf) {
+        vfree(pud->tx_buf);
+        pud->tx_buf = NULL;
+    }
+}
+
 struct drm_device *pud_drm_alloc(struct device *dev)
 {
     struct pud *pud;
@@ -344,13 +396,19 @@ struct drm_device *pud_drm_alloc(struct device *dev)
     }
     drm = &pud->drm;
 
-    pud->dma_mask = DMA_BIT_MASK(32);
+    /* The streaming dma_mask is 64-bit so dma-buf buffers imported from the
+     * compositor (often above 4GB) map directly without swiotlb bounce, while
+     * the coherent mask stays 32-bit so our own encoder buffer (sent over the
+     * USB bulk endpoint) stays in a DMA range any USB controller can reach.
+     */
+    pud->dma_mask = DMA_BIT_MASK(64);
     dev->dma_mask = &pud->dma_mask;
-    dev->coherent_dma_mask = pud->dma_mask;
+    dev->coherent_dma_mask = DMA_BIT_MASK(32);
 
     rc = pud_drm_dev_init(pud, &pud_display_pipe_funcs, &pud_disp_mode);
     if (rc) {
         pr_err("failed to init drm dev\n");
+        pud_drm_release_buffers(pud);
         return ERR_PTR(-ENOMEM);
     }
 
@@ -359,7 +417,10 @@ struct drm_device *pud_drm_alloc(struct device *dev)
 
 void pud_drm_release(struct drm_device *drm)
 {
+    struct pud *pud = drm_to_pud(drm);
+
     pr_info("%s\n", __func__);
+    pud_drm_release_buffers(pud);
 }
 
 int pud_drm_register(struct drm_device *drm)
@@ -376,7 +437,7 @@ int pud_drm_register(struct drm_device *drm)
         return -1;
     };
 
-    drm_fbdev_dma_setup(drm, 0);
+    drm_fbdev_generic_setup(drm, 0);
 
     return 0;
 }
@@ -390,7 +451,5 @@ void pud_drm_unregister(struct drm_device *drm)
     drm_dev_unplug(drm);
     drm_atomic_helper_shutdown(drm);
 
-    sg_free_table(&pud->bulk_sgt);
-    kfree(pud->encoder_buf);
-    pud->encoder_buf = NULL;
+    pud_drm_release_buffers(pud);
 }

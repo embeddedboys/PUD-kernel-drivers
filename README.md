@@ -58,3 +58,13 @@ mplayer output to fbdev
 ```bash
 mplayer -vo fbdev2 -vf scale=480:320 xxx.mp4
 ```
+
+## Development notes
+
+Design notes and pitfall write-ups for maintainers live in [`notes/`](./notes/):
+
+- [Architecture and code map](./notes/architecture.md)
+- [USB protocol](./notes/usb-protocol.md) (authoritative field definitions)
+- [Display and refresh policy](./notes/display-and-refresh.md) (damage, QOI, band splitting)
+- [Build and test](./notes/build-and-test.md) (6.1.118 objtree / 6.1.172 headers)
+- [Pitfalls](./notes/pitfalls.md) (DMA buffers, `transfer buffer is on stack`, vmalloc, swiotlb)
