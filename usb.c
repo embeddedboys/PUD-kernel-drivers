@@ -49,7 +49,7 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request,
         0, 0,
         pud->ctrl_buf,
         sizeof(pud->ctrl_buf),
-        pud_DEFAULT_TIMEOUT
+        PUD_DEFAULT_TIMEOUT
     );
 
     pipe = (addr & USB_DIR_OUT) ? usb_sndbulkpipe(udev, addr) : \
@@ -61,7 +61,7 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request,
         (void *)data,
         len,
         &actual_length,
-        pud_DEFAULT_TIMEOUT
+        PUD_DEFAULT_TIMEOUT
     );
 
     return actual_length;
@@ -124,7 +124,7 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
         0, 0,
         pud->ctrl_buf,
         sizeof(pud->ctrl_buf),
-        pud_DEFAULT_TIMEOUT
+        PUD_DEFAULT_TIMEOUT
     );
 
     /* Without a successful window request the device would still use the
@@ -377,7 +377,7 @@ static int pud_probe(struct usb_interface *intf,
     if (!serial)
         return -ENOMEM;
 
-#if pud_DEF_DISP_BACKEND == pud_DISP_BACKEND_FBDEV
+#if PUD_DEF_DISP_BACKEND == PUD_DISP_BACKEND_FBDEV
     rc = pud_fb_steup(intf, id);
 #else
     rc = pud_drm_setup(intf, id);
@@ -395,7 +395,7 @@ static int pud_probe(struct usb_interface *intf,
     /* Device limits (transfer size / band budget) before anything flushes. */
     pud_read_caps(usb_get_intfdata(intf));
 
-#if pud_ENABLE_INPUT_SUPPORT
+#if PUD_ENABLE_INPUT_SUPPORT
     pud_input_setup(intf, id);
 #endif
 
@@ -411,13 +411,13 @@ static void pud_disconnect(struct usb_interface *intf)
 
     pud->disconnected = true;
 
-#if pud_DEF_DISP_BACKEND == pud_DISP_BACKEND_FBDEV
+#if PUD_DEF_DISP_BACKEND == PUD_DISP_BACKEND_FBDEV
     pud_fb_cleanup(intf);
 #else
     pud_drm_cleanup(intf);
 #endif
 
-#if pud_ENABLE_INPUT_SUPPORT
+#if PUD_ENABLE_INPUT_SUPPORT
     pud_input_cleanup(intf);
 #endif
 }

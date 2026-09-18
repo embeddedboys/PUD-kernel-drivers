@@ -29,7 +29,7 @@ static void pud_tp_work(struct work_struct *work)
 		0, 0,
 		NULL,
 		0,
-		pud_DEFAULT_TIMEOUT
+		PUD_DEFAULT_TIMEOUT
 	);
 
 	ret = usb_submit_urb(urb, GFP_KERNEL);

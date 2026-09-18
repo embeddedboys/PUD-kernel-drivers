@@ -160,7 +160,7 @@ struct pud_usb_bulk_context ctx;   /* 含 usb_sg_request + timer_list，确实�
 ```c
 int rc, actual_length;                 /* actual_length 未初始化 */
 ...
-rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length, pud_DEFAULT_TIMEOUT);
+rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length, PUD_DEFAULT_TIMEOUT);
 return actual_length;                  /* ← 可能是栈上垃圾值 */
 ```
 
@@ -187,7 +187,7 @@ rc = usb_control_msg(...);
 if (rc < 0)
     return rc;
 
-rc = usb_bulk_msg(udev, pipe, data, len, &actual_length, pud_DEFAULT_TIMEOUT);
+rc = usb_bulk_msg(udev, pipe, data, len, &actual_length, PUD_DEFAULT_TIMEOUT);
 return rc < 0 ? rc : actual_length;
 ```
 

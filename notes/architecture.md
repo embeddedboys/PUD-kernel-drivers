@@ -14,7 +14,7 @@
 | `usb.c` | 驱动主干：USB 厂商协议收发、`pud_flush()`、probe/disconnect、DRM/fbdev 后端选择 |
 | `pud.h` | `struct pud` 主结构、端点/请求常量、后端选择开关 |
 | `drm.c` | DRM 后端：`drm_simple_display_pipe` 注册、damage 局部刷新、QOI 编码与分带 |
-| `fb.c` | fbdev 后端（`pud_DISP_BACKEND_FBDEV`）：老式 framebuffer 接口 |
+| `fb.c` | fbdev 后端（`PUD_DISP_BACKEND_FBDEV`）：老式 framebuffer 接口 |
 | `encoder.c` / `encoder.h` | 编码层封装，对外暴露 `qoi_encode_rgb565()` |
 | `rgb565_qoi.c` / `rgb565_qoi.h` | RGB565 QOI 编解码库（来自 `rgb565-qoi/`，头文件加了 `__KERNEL__` 适配） |
 | `jpegenc.c` / `jpegenc.h` | 早期 JPEG 编码路径，现在仅在 fbdev 后端的 `pud_bmp_blit()` 里还被用到 |
@@ -34,8 +34,8 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o fb.o drm.o input.o
 
 | 宏 | 默认 | 说明 |
 | --- | --- | --- |
-| `pud_DEF_DISP_BACKEND` | `pud_DISP_BACKEND_DRM` | 后端选择：`0`=fbdev，`1`=DRM |
-| `pud_ENABLE_INPUT_SUPPORT` | `1` | 是否注册触摸 input 设备 |
+| `PUD_DEF_DISP_BACKEND` | `PUD_DISP_BACKEND_DRM` | 后端选择：`0`=fbdev，`1`=DRM |
+| `PUD_ENABLE_INPUT_SUPPORT` | `1` | 是否注册触摸 input 设备 |
 
 ## 数据流（DRM 后端，当前主路径）
 

@@ -29,16 +29,16 @@
 #include <drm/drm_gem_framebuffer_helper.h>
 
 /* Display backends select, fbdev is default */
-#define pud_DISP_BACKEND_FBDEV 0
-#define pud_DISP_BACKEND_DRM   1
+#define PUD_DISP_BACKEND_FBDEV 0
+#define PUD_DISP_BACKEND_DRM   1
 
-#ifndef pud_DEF_DISP_BACKEND
-    #define pud_DEF_DISP_BACKEND pud_DISP_BACKEND_DRM
+#ifndef PUD_DEF_DISP_BACKEND
+    #define PUD_DEF_DISP_BACKEND PUD_DISP_BACKEND_DRM
 #endif
 
 /* Whether to enable input device */
-#ifndef pud_ENABLE_INPUT_SUPPORT
-    #define pud_ENABLE_INPUT_SUPPORT    1
+#ifndef PUD_ENABLE_INPUT_SUPPORT
+    #define PUD_ENABLE_INPUT_SUPPORT    1
 #endif
 
 // TODO: Currently only support less than 40000 bytes transfer
@@ -65,7 +65,7 @@ struct pud_caps {
     u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI */
 };
 
-#define pud_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
+#define PUD_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
 
 #define EP0_IN_ADDR  (USB_DIR_IN  | 0)
 #define EP0_OUT_ADDR (USB_DIR_OUT | 0)
