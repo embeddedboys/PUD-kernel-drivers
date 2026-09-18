@@ -73,6 +73,7 @@ all: modules
 
 modules: $(if $(filter $(NATIVE_KERN_DIR),$(KBUILD_KERN_DIR)),$(NATIVE_KERN_DIR))
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+	@$(MAKE) --no-print-directory compile_commands.json
 
 clean:
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules clean
@@ -115,6 +116,23 @@ $(NATIVE_KERN_DIR):
 test: all
 	sudo rmmod $(MODULE_NAME).ko || true
 	sudo insmod $(MODULE_NAME).ko || true
+
+# ---------------------------------------------------------------------------
+# Editor support.  kbuild records one .<obj>.cmd per object, and the kernel
+# ships the tool that turns those into a compilation database, so every build
+# refreshes compile_commands.json for clangd (see .clangd).  Generated, not
+# committed.
+# ---------------------------------------------------------------------------
+GEN_COMPILE_COMMANDS := $(KBUILD_KERN_DIR)/scripts/clang-tools/gen_compile_commands.py
+
+.PHONY: compile_commands.json
+compile_commands.json:
+	@if [ -f "$(GEN_COMPILE_COMMANDS)" ]; then \
+		python3 "$(GEN_COMPILE_COMMANDS)" -d $(CURDIR) -o $(CURDIR)/$@ && \
+			echo "  CC-DB   $@"; \
+	else \
+		echo "  CC-DB   skipped, $(GEN_COMPILE_COMMANDS) is not there"; \
+	fi
 
 obj-m += $(MODULE_NAME).o
 $(MODULE_NAME)-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o

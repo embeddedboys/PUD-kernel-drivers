@@ -1,0 +1,15 @@
+# clangd / editor support for this out-of-tree kernel module.
+#
+# `make modules` writes compile_commands.json next to this file: kbuild records
+# one .<obj>.cmd per object and the kernel's scripts/clang-tools/
+# gen_compile_commands.py turns those into a compilation database.  clangd only
+# has to be told where to look.
+#
+# The recorded commands invoke the cross compiler, so give clangd that
+# compiler's builtin include paths as well -- start it as
+#
+#     clangd --query-driver=/usr/bin/aarch64-linux-gnu-*
+#
+# if diagnostics about missing headers show up.
+CompileFlags:
+  CompilationDatabase: .

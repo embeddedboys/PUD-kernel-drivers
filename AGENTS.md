@@ -112,6 +112,11 @@
 - 新增源文件要加进 `Makefile` 的对象列表（写法是
   `$(MODULE_NAME)-y += ...`，其中 `MODULE_NAME:=pud`）。
 - 收尾自查：`make modules` 没有新增 warning，`dmesg` 里没有 WARN/oops。
+- `make modules` 会顺带生成 **`compile_commands.json`**（用内核的
+  `scripts/clang-tools/gen_compile_commands.py` 解析 kbuild 留下的 `.*.cmd`），仓库根的
+  `.clangd` 指向它 —— 编辑器/clangd 开箱可用。生成物不入库
+  （`.gitignore` 已忽略）；交叉编译器自带的头文件路径若报缺失，用
+  `clangd --query-driver=/usr/bin/aarch64-linux-gnu-*` 启动。
 
 ## 文档维护
 
