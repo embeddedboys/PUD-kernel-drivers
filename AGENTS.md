@@ -108,7 +108,9 @@
 
 ## 代码约定
 
-- C 风格与现有文件一致（4 空格缩进），`u8/u16/u32` 是内核类型别名。
+- C 风格用**内核风格：tab + 8 宽缩进**（仓库根的 `.clang-format` 是从内核原样拿的 ✓），
+  `u8/u16/u32` 是内核类型别名。代码已整体按它格式化过；**vendored 的
+  `rgb565_qoi.*` / `rgb565_rle.*` / `jpegenc.*` 不要格式化**（要与上游逐字节一致）。
 - 新增源文件要加进 `Makefile` 的对象列表（写法是
   `$(MODULE_NAME)-y += ...`，其中 `MODULE_NAME:=pud`）。
 - 收尾自查：`make modules` 没有新增 warning，`dmesg` 里没有 WARN/oops。
