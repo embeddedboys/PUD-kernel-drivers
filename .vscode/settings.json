@@ -1,0 +1,56 @@
+{
+  // clangd is the language server here; `make modules` writes the compilation
+  // database it reads (see the Makefile and .clangd), so the Microsoft C/C++
+  // extension's own IntelliSense is switched off to keep the two from fighting.
+  "C_Cpp.intelliSenseEngine": "disabled",
+
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}",
+    // Index the whole module in the background -- without it, "go to
+    // definition" only ever finds the declaration in a header, never the
+    // implementation in the .c file.
+    "--background-index",
+    "--background-index-priority=normal",
+    // The commands in the database invoke the cross compiler; let clangd ask it
+    // for its builtin include paths instead of guessing.
+    "--query-driver=**/aarch64-linux-gnu-*",
+    // Kernel code: no #include ever gets inserted behind our back, and the
+    // argument placeholders stay.
+    "--header-insertion=never",
+    "--header-insertion-decorators=0",
+    "--function-arg-placeholders=1",
+    "--all-scopes-completion",
+    "--completion-style=detailed",
+    "--pch-storage=memory",
+    // .clangd removes the GCC-only flags and tells clangd where the database
+    // is; --clang-tidy surfaces the kernel-ish warnings in the editor.
+    "--clang-tidy",
+    "--limit-results=100"
+  ],
+
+  "clangd.onConfigChanged": "restart",
+  "clangd.detectExtensionConflicts": true,
+
+  // Build output is noise in the explorer and the pickers.
+  "files.exclude": {
+    "**/*.o": true,
+    "**/*.ko": true,
+    "**/*.mod": true,
+    "**/*.mod.c": true,
+    "**/.*.cmd": true,
+    "**/Module.symvers": true,
+    "**/modules.order": true,
+    "**/.tmp_versions": true
+  },
+  "search.exclude": {
+    "compile_commands.json": true,
+    "tests/test_fb": true,
+    "tests/rect": true
+  },
+
+  // This tree is 4-space kernel style, and there is no .clang-format to point a
+  // formatter at, so saving must not reformat anything.
+  "editor.formatOnSave": false,
+  "files.trimTrailingWhitespace": false,
+  "files.insertFinalNewline": true
+}
