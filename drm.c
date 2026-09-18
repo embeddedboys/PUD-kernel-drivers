@@ -239,9 +239,19 @@ static const uint32_t pud_drm_formats[] = {
     DRM_FORMAT_XRGB8888,    /* DRM driver framebuffer format */
 };
 
-static const struct drm_display_mode pud_disp_mode = {
-    DRM_MODE_INIT(60, 480, 320, 85, 55),
-};
+/*
+ * The mode is built at probe time from the panel parameters the device reports
+ * (PUD_CMD_GET_CAPS), so it is no longer a compile-time constant: the same
+ * driver follows whatever panel the firmware drives.
+ */
+static void pud_mode_init(struct drm_display_mode *mode,
+                          const struct pud_display *disp)
+{
+    *mode = (struct drm_display_mode){
+        DRM_MODE_INIT(60, disp->xres, disp->yres,
+                      disp->width_mm ?: 85, disp->height_mm ?: 55)
+    };
+}
 
 DEFINE_DRM_GEM_DMA_FOPS(pud_drm_fops);
 
@@ -383,8 +393,10 @@ static void pud_drm_release_buffers(struct pud *pud)
     }
 }
 
-struct drm_device *pud_drm_alloc(struct device *dev)
+struct drm_device *pud_drm_alloc(struct device *dev,
+                                 const struct pud_caps *caps, int caps_len)
 {
+    struct drm_display_mode mode;
     struct pud *pud;
     struct drm_device *drm;
     int rc;
@@ -398,6 +410,14 @@ struct drm_device *pud_drm_alloc(struct device *dev)
     }
     drm = &pud->drm;
 
+    /* Panel parameters before anything is sized from them: the mode below and,
+     * inside pud_drm_dev_init(), the encoder buffer and the plane limits. */
+    pud->display = &pud->display_data;
+    pud->display_data = pud_default_display;
+    if (caps_len >= (int)sizeof(*caps))
+        pud_caps_to_display(&pud->display_data, caps);
+    pud_mode_init(&mode, &pud->display_data);
+
     /* The streaming dma_mask is 64-bit so dma-buf buffers imported from the
      * compositor (often above 4GB) map directly without swiotlb bounce, while
      * the coherent mask stays 32-bit so our own encoder buffer (sent over the
@@ -407,7 +427,7 @@ struct drm_device *pud_drm_alloc(struct device *dev)
     dev->dma_mask = &pud->dma_mask;
     dev->coherent_dma_mask = DMA_BIT_MASK(32);
 
-    rc = pud_drm_dev_init(pud, &pud_display_pipe_funcs, &pud_disp_mode);
+    rc = pud_drm_dev_init(pud, &pud_display_pipe_funcs, &mode);
     if (rc) {
         pr_err("failed to init drm dev\n");
         pud_drm_release_buffers(pud);
