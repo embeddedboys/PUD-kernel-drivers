@@ -103,6 +103,13 @@ pud 7-1:1.0: caps: proto 1, frame_max 65536, decoder 3 -> 21839 pixels per band
 
 每条带**独立编码、独立 `pud_flush()`**，坐标是真实带边界（`band.y2 - 1` 作为 `ye`）。
 
+> **JPEG 路径只整屏用。** fbdev 后端（`pud_bmp_blit` / fb deferred-IO）发的是整屏 JPEG，
+> 坐标固定 `(0,0)`；DRM 后端一律 QOI 分带。不要给 JPEG 帧传非零 `x`：固件侧
+> JPEGDEC 在 `x != 0` 时 `iWidthUsed` 会算出负值，`xe` 被填成子图内坐标、`len` 变成巨大的
+> 无符号数，一次这样的 flush 就把 `decoder_task` 卡死、帧槽永不释放（真机复现：
+> `submitted/drawn = 2/0`，主机持续超时）。固件仓 `notes/decoders.md` 有完整数据。
+
+
 > 这里曾有一个真实 bug：早期版本无论刷哪条带，`xe/ye` 都填的是整屏右下角，
 > 导致 `x > 0` 的窗口刷新位置错误。现已修正。
 

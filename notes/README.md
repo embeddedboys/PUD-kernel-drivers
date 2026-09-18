@@ -16,6 +16,7 @@
 ## 相关仓库
 
 - 固件端：`Pico-USB-Display`（RP2350 / FreeRTOS / CherryUSB），其知识库在 `Pico-USB-Display/notes/`
+  （固件侧的待办清单在同目录的 `todo.md`）
 - QOI 编解码库：`rgb565-qoi/`（上游独立仓库），本驱动通过 `rgb565_qoi.c` / `rgb565_qoi.h` 内联集成
 
 ## 维护约定

@@ -24,7 +24,28 @@
 | EP1 | OUT / bulk | **图像压缩流**（QOI 帧数据） | 使用中 |
 | EP2 | IN / bulk | 查询响应（如读序列号） | 使用中 |
 | EP3 | OUT / bulk | — | 固件已定义 `REQ_EP3_OUT`/`EP3_OUT_ADDR`，但**未写进配置描述符**，未实现 |
-| EP4 | IN / interrupt (64B, bInterval 33) | 触摸数据 | 固件侧打桩，未真正上报 |
+| EP4 | IN / interrupt (64B, bInterval 33) | 触摸数据（设备主动推送） | 见下 |
+
+## EP4 触摸上报
+
+设备**主动推送**：主机的 interrupt IN URB 常挂（不要每个样本发一次控制请求），
+触摸任务每 33 ms 轮询一次控制器，按下期间每帧一次、松手补一帧，空闲不发。
+
+| 字节 | 含义 |
+| --- | --- |
+| 0 | flags，bit0 = 按下 |
+| 1–2 | x >> 8、x & 0xff（大端） |
+| 3–4 | y >> 8、y & 0xff |
+| 5 | sequence（回绕） |
+| 6 | version = 1 |
+| 7 | 保留 |
+
+- 坐标是**显示坐标系**下的面板坐标（0..479 / 0..319），设备已按 `TFT_ROTATION` 变换并
+  钳位，驱动直接用（`ABS_X/ABS_Y` 的 480/320 范围就是它）。
+- 字节 0..4 与旧驱动解析的布局一致；version != 0 表示这版固件真的支持触摸。
+- `REQ_EP4_IN`(0x05) 仍可用：它返回**当前**这一帧（轮询式主机）。
+- 空闲时设备不发帧，所以 `usb_submit_urb()` 会一直挂着 —— 这是正常的，
+  **不要在 URB 回调里因为 `-ETIMEDOUT`/`-EPROTO` 就停止重提交**。
 
 ## 请求号
 
@@ -159,7 +180,7 @@ struct pud_caps {
     u32 magic;          /* PUD_CAPS_MAGIC = 0x43445550 ("PUDC") */
     u32 proto_ver;      /* PUD_PROTO_VER = 1 */
     u32 frame_max;      /* 单次 EP1 传输上限：RP2350 65536，RP2040 32768 */
-    u32 decoder_type;   /* 0 unused, 1 JPEGDEC, 2 LZ4, 3 QOI */
+    u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE */
 };
 ```
 
