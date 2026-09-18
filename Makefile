@@ -129,6 +129,9 @@ GEN_COMPILE_COMMANDS := $(KBUILD_KERN_DIR)/scripts/clang-tools/gen_compile_comma
 compile_commands.json:
 	@if [ -f "$(GEN_COMPILE_COMMANDS)" ]; then \
 		python3 "$(GEN_COMPILE_COMMANDS)" -d $(CURDIR) -o $(CURDIR)/$@ && \
+		python3 -c "import json; p='$(CURDIR)/$@'; d=json.load(open(p)); \
+			[e.update(directory='$(KBUILD_KERN_DIR)') for e in d]; \
+			json.dump(d, open(p,'w'), indent=1)" && \
 			echo "  CC-DB   $@"; \
 	else \
 		echo "  CC-DB   skipped, $(GEN_COMPILE_COMMANDS) is not there"; \

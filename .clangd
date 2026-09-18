@@ -13,3 +13,9 @@
 # if diagnostics about missing headers show up.
 CompileFlags:
   CompilationDatabase: .
+  # kbuild passes a few GCC-only flags; clang rejects -mabi=lp64 outright
+  # ("unknown target ABI"), which kills the preamble and with it all indexing.
+  Remove:
+    - -mabi=lp64
+    - -fno-allow-store-data-races
+    - -fconserve-stack
