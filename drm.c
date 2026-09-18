@@ -14,6 +14,7 @@
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <video/mipi_display.h>
+#include <drm/drm_edid.h>
 
 #include "pud.h"
 #include "encoder.h"
@@ -238,6 +239,74 @@ static int pud_connector_get_modes(struct drm_connector *connector)
 	return drm_connector_helper_get_modes_fixed(connector, &pud->mode);
 }
 
+/*
+ * A minimal EDID for the panel.
+ *
+ * The connector has none of its own -- this is a USB display, not something the
+ * kernel probed -- and that is what leaves a compositor unable to tell which
+ * output an absolute input device belongs to: Mutter matches a device to an
+ * output by EDID vendor/product/serial first and by physical size second, and
+ * an output that reports neither leaves the touchscreen unmapped, at which point
+ * the touch coordinates get scaled across the whole screen instead.
+ *
+ * The manufacturer id spells "PUD", which the input device's own name ("pud
+ * touch panel") contains, so the vendor match lands whatever the size
+ * comparison makes of the numbers.
+ */
+static u8 pud_edid[128];
+
+static void pud_edid_build(unsigned int width_mm, unsigned int height_mm)
+{
+	static const u8 header[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+	u8 sum = 0;
+	int i;
+
+	memset(pud_edid, 0, sizeof(pud_edid));
+	memcpy(pud_edid, header, sizeof(header));
+
+	/* manufacturer "PUD": five bits per letter, 'A' = 1 (not its ASCII code) */
+	pud_edid[8] = (u8)((('P' - 'A' + 1) << 2) | (('U' - 'A' + 1) >> 3));
+	pud_edid[9] = (u8)(((('U' - 'A' + 1) & 0x07) << 5) | ('D' - 'A' + 1));
+
+	pud_edid[10] = 0x01;			/* product code 1 */
+	pud_edid[12] = 0x01;			/* serial 1 */
+	pud_edid[16] = 1;			/* week */
+	pud_edid[17] = 2025 - 1990;		/* year */
+	pud_edid[18] = 1;			/* EDID 1.4 */
+	pud_edid[19] = 4;
+	pud_edid[20] = 0x80;			/* digital input */
+	pud_edid[21] = (u8)(width_mm / 10);	/* EDID counts in cm */
+	pud_edid[22] = (u8)(height_mm / 10);
+	pud_edid[23] = 0x78;			/* gamma 2.2 */
+
+	/* descriptor 1: monitor name, 13 characters, padded with 0x0a */
+	pud_edid[57] = 0xfc;
+	memcpy(&pud_edid[59], "pud touch pan", 13);
+
+	/* descriptor 2: ASCII string */
+	pud_edid[75] = 0xfe;
+	memcpy(&pud_edid[77], "PUD touch panel", 15);
+
+	/* descriptor 3: range limits -- 48..62 Hz, 30..60 kHz, 80 MHz, none
+	 * supported */
+	pud_edid[93] = 0xfd;
+	pud_edid[95] = 48;
+	pud_edid[96] = 62;
+	pud_edid[97] = 30;
+	pud_edid[98] = 60;
+	pud_edid[99] = 8;
+	pud_edid[101] = 0x0a;
+
+	/* descriptor 4: dummy */
+	pud_edid[111] = 0x10;
+
+	pud_edid[126] = 0;			/* no extension blocks */
+
+	for (i = 0; i < 127; i++)
+		sum = (u8)(sum + pud_edid[i]);
+	pud_edid[127] = (u8)(0 - sum);
+}
+
 static const struct drm_connector_helper_funcs pud_connector_hfuncs = {
     .get_modes = pud_connector_get_modes,
 };
@@ -365,6 +434,42 @@ static int pud_drm_dev_init_with_formats(struct pud *pud,
         pr_err("failed to init connector\n");
         return rc;
     }
+
+    /*
+     * Declare the output's physical size, because that is how a compositor
+     * decides which output an absolute input device belongs to: Mutter compares
+     * the device's size against the output's and wants them within 5% (an
+     * output that reports 0 mm never matches, and the touchscreen then falls
+     * back to spanning the whole screen).
+     *
+     * The device's size is derived from its axis resolution, which is an
+     * integer, so the value worth reporting is exactly xres/res millimeters --
+     * not the nominal panel size, which rounding would push past the 5%.
+     */
+    if (pud->display->width_mm && pud->display->height_mm) {
+        unsigned int rx, ry;
+
+        rx = DIV_ROUND_CLOSEST(pud->display->xres, pud->display->width_mm);
+        ry = DIV_ROUND_CLOSEST(pud->display->yres, pud->display->height_mm);
+        if (rx && ry) {
+            pud->connector.display_info.width_mm =
+                DIV_ROUND_CLOSEST(pud->display->xres, rx);
+            pud->connector.display_info.height_mm =
+                DIV_ROUND_CLOSEST(pud->display->yres, ry);
+            pr_info("panel size for input mapping: %ux%u mm\n",
+                    pud->connector.display_info.width_mm,
+                    pud->connector.display_info.height_mm);
+        }
+    }
+
+    /* Give the output an identity, so a compositor can tell which output the
+     * touchscreen belongs to (see pud_edid_build()). */
+    pud_edid_build(pud->display->width_mm ?: 74,
+                   pud->display->height_mm ?: 49);
+    rc = drm_connector_update_edid_property(&pud->connector,
+                                            (const struct edid *)pud_edid);
+    if (rc)
+        pr_warn("failed to attach the panel EDID: %d\n", rc);
 
     rc = drm_simple_display_pipe_init(drm, &pud->pipe, funcs, formats, formats_count, modifiers, &pud->connector);
     if (rc) {

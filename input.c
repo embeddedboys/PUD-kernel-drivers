@@ -161,7 +161,14 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 
 	input_dev->dev.parent = &intf->dev;
 	input_dev->name = "pud touch panel";
+	/* The USB ids, so userspace can identify the device -- and so the
+	 * per-device settings path Mutter builds from vendor:product (used to
+	 * pick the output a touchscreen belongs to) is stable instead of
+	 * 0000:0000. */
 	input_dev->id.bustype = BUS_USB;
+	input_dev->id.vendor = le16_to_cpu(udev->descriptor.idVendor);
+	input_dev->id.product = le16_to_cpu(udev->descriptor.idProduct);
+	input_dev->id.version = le16_to_cpu(udev->descriptor.bcdDevice);
 
 	/* Coordinates are panel coordinates in the frame the panel is driven in:
 	 * the firmware applies TFT_ROTATION and clamps before reporting, so

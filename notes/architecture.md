@@ -67,8 +67,33 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 2. 触摸屏用 `INPUT_PROP_DIRECT` 判定；单点屏 libinput 也支持，但 MT-B 才是标准形态
    （手势/长按/拖拽的 tracking 靠 `ABS_MT_TRACKING_ID`，松手必须发 `-1`）。
 
-**实测（2026-09，真机 + 板子上的 libinput 1.25.0）**：`touch` 模式 libinput 报
-`Capabilities: touch`、`Size: 80x46mm`，8 次拖动共 1000+ 个 MT 点、tracking id 递增、
+### 多显示器下触摸屏绑到哪块屏
+
+绝对输入设备必须由合成器绑到某块输出，**没绑上时触摸坐标会被铺满整个屏幕**（所有显示器的
+包围盒）——症状是"摸副屏、点到大屏上、副屏窗口失焦"。Mutter（`meta-input-mapper.c`）只认三件事：
+设备名里的 EDID 厂商/型号串、**设备尺寸与输出尺寸相差 <5%**、"内建屏"；都没有就保持未绑定，
+而 GNOME 46 也没有把设备绑到输出的用户界面（`InputMapping` 只有读接口）。
+
+驱动因此让**尺寸**这条成立（它不看设备名，比名字匹配稳）：给 connector 声明物理尺寸
+（`display_info.width_mm/height_mm`，取输入设备由整数分辨率反推的尺寸，两边精确一致），
+并附一份最小 **EDID**（厂商 `PUD`、名称 "pud touch pan"、7×4cm、无 detailed timing，
+所以不影响我们自己的 mode）。没有 EDID 时 Mutter 看到的厂商/型号/序列号全是 NULL，
+`match_size` 也没有数据 —— 两个都改才生效。
+
+EDID 只以整厘米记尺寸，内核分辨率是整数量/mm，两个粒度要对上就得凑数字：固件因此上报
+**70×40mm**（玻璃实际约 74×49），分辨率取 7/8 → 反推 68.6×40mm，与 EDID 的 70×40mm 差
+2.1%/0% ✓。只影响上报的设备尺寸与 DPI 估算，不影响坐标。
+
+> 备用手段（当自动匹配不成立时）：显式写 `output` 键 —— Mutter 里 `META_MATCH_CONFIG`
+> 优先级最高且**不依赖尺寸**：
+> ```
+> gsettings set org.gnome.desktop.peripherals.touchscreen:/org/gnome/desktop/peripherals/touchscreens/<vendor>:<product>/ \
+>   output "['PUD', 'pud touch pan', '0x00000001']"
+> ```
+> `<vendor>:<product>` 是设备 id（`/sys/class/input/eventN/device/id/{vendor,product}`）。
+> 同样**没有 EDID 就没法用**：那时厂商/型号/序列号是 NULL，比不出相等。
+
+**实测（2026-09，真机 + 板子上的 libinput 1.25.0）**：`touch` 模式 libinput 报`Capabilities: touch`、`Size: 80x46mm`，8 次拖动共 1000+ 个 MT 点、tracking id 递增、
 每次松手 `-1`、`BTN_TOUCH` 各 8 次按下/松开、采样间隔中位 **8.0 ms**；
 `pointer` 模式 libinput 报 `Capabilities: pointer`，一次 5.0 秒拖动 432 个坐标点
 （x 26..372、y 76..270）、只有 **2 个 `BTN_LEFT`**（按下 + 松手）、

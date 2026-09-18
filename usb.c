@@ -479,6 +479,11 @@ static int pud_probe(struct usb_interface *intf,
     }
 
 #if PUD_ENABLE_INPUT_SUPPORT
+    /* Both branches publish the device on the interface (the display backends
+     * do it while they set up), and the capability flags that decide whether
+     * there is a touch controller live in it. */
+    pud = usb_get_intfdata(intf);
+
     /* Input is a bonus, and optional on the device side: a firmware built
      * without a touch driver (most board configs) says so in the capability
      * flags and gets no input device here. */
