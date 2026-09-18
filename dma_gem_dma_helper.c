@@ -132,7 +132,7 @@ error:
  * error code on failure.
  */
 struct drm_gem_dma_object *drm_gem_dma_create(struct drm_device *drm,
-					      size_t size)
+                                              size_t size)
 {
 	struct drm_gem_dma_object *dma_obj;
 	int ret;
@@ -145,12 +145,12 @@ struct drm_gem_dma_object *drm_gem_dma_create(struct drm_device *drm,
 
 	if (dma_obj->map_noncoherent) {
 		dma_obj->vaddr = dma_alloc_noncoherent(
-			drm->dev, size, &dma_obj->dma_addr, DMA_TO_DEVICE,
-			GFP_KERNEL | __GFP_NOWARN);
+		        drm->dev, size, &dma_obj->dma_addr, DMA_TO_DEVICE,
+		        GFP_KERNEL | __GFP_NOWARN);
 	} else {
 		dma_obj->vaddr = dma_alloc_wc(drm->dev, size,
-					      &dma_obj->dma_addr,
-					      GFP_KERNEL | __GFP_NOWARN);
+		                              &dma_obj->dma_addr,
+		                              GFP_KERNEL | __GFP_NOWARN);
 	}
 	if (!dma_obj->vaddr) {
 		drm_dbg(drm, "failed to allocate buffer with size %zu\n", size);
@@ -187,8 +187,8 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_create);
  */
 static struct drm_gem_dma_object *
 drm_gem_dma_create_with_handle(struct drm_file *file_priv,
-			       struct drm_device *drm, size_t size,
-			       uint32_t *handle)
+                               struct drm_device *drm, size_t size,
+                               uint32_t *handle)
 {
 	struct drm_gem_dma_object *dma_obj;
 	struct drm_gem_object *gem_obj;
@@ -229,16 +229,16 @@ void drm_gem_dma_free(struct drm_gem_dma_object *dma_obj)
 	if (gem_obj->import_attach) {
 		if (dma_obj->vaddr)
 			dma_buf_vunmap_unlocked(gem_obj->import_attach->dmabuf,
-						&map);
+			                        &map);
 		drm_prime_gem_destroy(gem_obj, dma_obj->sgt);
 	} else if (dma_obj->vaddr) {
 		if (dma_obj->map_noncoherent)
 			dma_free_noncoherent(gem_obj->dev->dev,
-					     dma_obj->base.size, dma_obj->vaddr,
-					     dma_obj->dma_addr, DMA_TO_DEVICE);
+			                     dma_obj->base.size, dma_obj->vaddr,
+			                     dma_obj->dma_addr, DMA_TO_DEVICE);
 		else
 			dma_free_wc(gem_obj->dev->dev, dma_obj->base.size,
-				    dma_obj->vaddr, dma_obj->dma_addr);
+			            dma_obj->vaddr, dma_obj->dma_addr);
 	}
 
 	drm_gem_object_release(gem_obj);
@@ -262,8 +262,8 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_free);
  * 0 on success or a negative error code on failure.
  */
 int drm_gem_dma_dumb_create_internal(struct drm_file *file_priv,
-				     struct drm_device *drm,
-				     struct drm_mode_create_dumb *args)
+                                     struct drm_device *drm,
+                                     struct drm_mode_create_dumb *args)
 {
 	unsigned int min_pitch = DIV_ROUND_UP(args->width * args->bpp, 8);
 	struct drm_gem_dma_object *dma_obj;
@@ -275,7 +275,7 @@ int drm_gem_dma_dumb_create_internal(struct drm_file *file_priv,
 		args->size = args->pitch * args->height;
 
 	dma_obj = drm_gem_dma_create_with_handle(file_priv, drm, args->size,
-						 &args->handle);
+	                                         &args->handle);
 	return PTR_ERR_OR_ZERO(dma_obj);
 }
 EXPORT_SYMBOL_GPL(drm_gem_dma_dumb_create_internal);
@@ -299,7 +299,7 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_dumb_create_internal);
  * 0 on success or a negative error code on failure.
  */
 int drm_gem_dma_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
-			    struct drm_mode_create_dumb *args)
+                            struct drm_mode_create_dumb *args)
 {
 	struct drm_gem_dma_object *dma_obj;
 
@@ -307,7 +307,7 @@ int drm_gem_dma_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
 	args->size = args->pitch * args->height;
 
 	dma_obj = drm_gem_dma_create_with_handle(file_priv, drm, args->size,
-						 &args->handle);
+	                                         &args->handle);
 	return PTR_ERR_OR_ZERO(dma_obj);
 }
 EXPORT_SYMBOL_GPL(drm_gem_dma_dumb_create);
@@ -336,10 +336,10 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_vm_ops);
  * mapping address on success or a negative error code on failure.
  */
 unsigned long drm_gem_dma_get_unmapped_area(struct file *filp,
-					    unsigned long addr,
-					    unsigned long len,
-					    unsigned long pgoff,
-					    unsigned long flags)
+                                            unsigned long addr,
+                                            unsigned long len,
+                                            unsigned long pgoff,
+                                            unsigned long flags)
 {
 	struct drm_gem_dma_object *dma_obj;
 	struct drm_gem_object *obj = NULL;
@@ -352,7 +352,7 @@ unsigned long drm_gem_dma_get_unmapped_area(struct file *filp,
 
 	drm_vma_offset_lock_lookup(dev->vma_offset_manager);
 	node = drm_vma_offset_exact_lookup_locked(dev->vma_offset_manager,
-						  pgoff, len >> PAGE_SHIFT);
+	                                          pgoff, len >> PAGE_SHIFT);
 	if (likely(node)) {
 		obj = container_of(node, struct drm_gem_object, vma_node);
 		/*
@@ -397,7 +397,7 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_get_unmapped_area);
  * This function prints dma_addr and vaddr for use in e.g. debugfs output.
  */
 void drm_gem_dma_print_info(const struct drm_gem_dma_object *dma_obj,
-			    struct drm_printer *p, unsigned int indent)
+                            struct drm_printer *p, unsigned int indent)
 {
 	drm_printf_indent(p, indent, "dma_addr=%pad\n", &dma_obj->dma_addr);
 	drm_printf_indent(p, indent, "vaddr=%p\n", dma_obj->vaddr);
@@ -426,7 +426,7 @@ struct sg_table *drm_gem_dma_get_sg_table(struct drm_gem_dma_object *dma_obj)
 		return ERR_PTR(-ENOMEM);
 
 	ret = dma_get_sgtable(obj->dev->dev, sgt, dma_obj->vaddr,
-			      dma_obj->dma_addr, obj->size);
+	                      dma_obj->dma_addr, obj->size);
 	if (ret < 0)
 		goto out;
 
@@ -457,8 +457,8 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_get_sg_table);
  */
 struct drm_gem_object *
 drm_gem_dma_prime_import_sg_table(struct drm_device *dev,
-				  struct dma_buf_attachment *attach,
-				  struct sg_table *sgt)
+                                  struct dma_buf_attachment *attach,
+                                  struct sg_table *sgt)
 {
 	struct drm_gem_dma_object *dma_obj;
 
@@ -475,7 +475,7 @@ drm_gem_dma_prime_import_sg_table(struct drm_device *dev,
 	dma_obj->sgt = sgt;
 
 	drm_dbg_prime(dev, "dma_addr = %pad, size = %zu\n", &dma_obj->dma_addr,
-		      attach->dmabuf->size);
+	              attach->dmabuf->size);
 
 	return &dma_obj->base;
 }
@@ -516,7 +516,7 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_vmap);
  * 0 on success or a negative error code on failure.
  */
 int drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj,
-		     struct vm_area_struct *vma)
+                     struct vm_area_struct *vma)
 {
 	struct drm_gem_object *obj = &dma_obj->base;
 	int ret;
@@ -533,12 +533,12 @@ int drm_gem_dma_mmap(struct drm_gem_dma_object *dma_obj,
 		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 
 		ret = dma_mmap_pages(dma_obj->base.dev->dev, vma,
-				     vma->vm_end - vma->vm_start,
-				     virt_to_page(dma_obj->vaddr));
+		                     vma->vm_end - vma->vm_start,
+		                     virt_to_page(dma_obj->vaddr));
 	} else {
 		ret = dma_mmap_wc(dma_obj->base.dev->dev, vma, dma_obj->vaddr,
-				  dma_obj->dma_addr,
-				  vma->vm_end - vma->vm_start);
+		                  dma_obj->dma_addr,
+		                  vma->vm_end - vma->vm_start);
 	}
 	if (ret)
 		drm_gem_vm_close(vma);
@@ -569,8 +569,8 @@ EXPORT_SYMBOL_GPL(drm_gem_dma_mmap);
  */
 struct drm_gem_object *
 drm_gem_dma_prime_import_sg_table_vmap(struct drm_device *dev,
-				       struct dma_buf_attachment *attach,
-				       struct sg_table *sgt)
+                                       struct dma_buf_attachment *attach,
+                                       struct sg_table *sgt)
 {
 	struct drm_gem_dma_object *dma_obj;
 	struct drm_gem_object *obj;

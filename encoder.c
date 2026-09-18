@@ -5,7 +5,7 @@
 #include "jpegenc.h"
 
 int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
-		       uint8_t *work_buf, size_t *out_size, u8 quality)
+                       uint8_t *work_buf, size_t *out_size, u8 quality)
 {
 	int rc, bits;
 	int pitch, bytewidth;
@@ -27,7 +27,7 @@ int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
 	jpeg.pHighWater = &jpeg.pOutput[jpeg.iBufferSize - 512];
 
 	rc = JPEGEncodeBegin(&jpeg, &jpe, w, h, JPEGE_PIXEL_RGB565,
-			     JPEGE_SUBSAMPLE_420, quality);
+	                     JPEGE_SUBSAMPLE_420, quality);
 	if (rc == JPEGE_SUCCESS)
 		JPEGAddFrame(&jpeg, &jpe, rgb565, pitch);
 
@@ -39,7 +39,7 @@ int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
 }
 
 int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
-		      uint8_t *work_buf, size_t *out_size)
+                      uint8_t *work_buf, size_t *out_size)
 {
 	size_t sz;
 
@@ -47,7 +47,7 @@ int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
 		return -EINVAL;
 
 	sz = rgb565_qoi_compress((const uint16_t *)rgb565, (size_t)w * h,
-				 work_buf, work_size);
+	                         work_buf, work_size);
 	if (sz == 0)
 		return -ENOSPC;
 
@@ -58,7 +58,7 @@ int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
 /* Same worst case as QOI (3 bytes per pixel plus framing), so the band budget
  * the device reports covers both. */
 int rle_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
-		      uint8_t *work_buf, size_t *out_size)
+                      uint8_t *work_buf, size_t *out_size)
 {
 	size_t sz;
 
@@ -66,7 +66,7 @@ int rle_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
 		return -EINVAL;
 
 	sz = rgb565_rle_compress((const uint16_t *)rgb565, (size_t)w * h,
-				 work_buf, work_size);
+	                         work_buf, work_size);
 	if (sz == 0)
 		return -ENOSPC;
 

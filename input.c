@@ -71,15 +71,15 @@ static void pud_tp_urb_callback(struct urb *urb)
 		}
 	} else if (urb->actual_length < PUD_TOUCH_REPORT_SIZE) {
 		dev_warn_ratelimited(pud->dev,
-				     "short touch report (%u bytes)\n",
-				     urb->actual_length);
+		                     "short touch report (%u bytes)\n",
+		                     urb->actual_length);
 	} else if (report[6] != PUD_TOUCH_VERSION) {
 		/* version 0 is a device that never reports anything, which is
 		 * fine: it just means touch is not implemented there */
 		if (report[6])
 			dev_warn_once(pud->dev,
-				      "touch report version %u, expected %u\n",
-				      report[6], PUD_TOUCH_VERSION);
+			              "touch report version %u, expected %u\n",
+			              report[6], PUD_TOUCH_VERSION);
 	} else {
 		pressed = !!(report[0] & PUD_TOUCH_PRESSED);
 		x = (u16)(report[1] << 8 | report[2]);
@@ -88,7 +88,7 @@ static void pud_tp_urb_callback(struct urb *urb)
 		if (pud_report_touch()) {
 			input_mt_slot(indev, 0);
 			input_mt_report_slot_state(indev, MT_TOOL_FINGER,
-						   pressed);
+			                           pressed);
 			if (pressed) {
 				input_report_abs(indev, ABS_MT_POSITION_X, x);
 				input_report_abs(indev, ABS_MT_POSITION_Y, y);
@@ -153,7 +153,7 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	}
 
 	usb_fill_int_urb(pud->input_urb, udev, pipe, pud->ep_int_buf, maxp,
-			 pud_tp_urb_callback, pud, endpoint_desc->bInterval);
+	                 pud_tp_urb_callback, pud, endpoint_desc->bInterval);
 
 	input_dev = devm_input_allocate_device(&intf->dev);
 	if (!input_dev) {
@@ -189,42 +189,42 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	 */
 	if (pud->display && pud->display->width_mm && pud->display->height_mm) {
 		input_abs_set_res(input_dev, ABS_X,
-				  DIV_ROUND_CLOSEST(xmax + 1,
-						    pud->display->width_mm));
+		                  DIV_ROUND_CLOSEST(xmax + 1,
+		                                    pud->display->width_mm));
 		input_abs_set_res(input_dev, ABS_Y,
-				  DIV_ROUND_CLOSEST(ymax + 1,
-						    pud->display->height_mm));
+		                  DIV_ROUND_CLOSEST(ymax + 1,
+		                                    pud->display->height_mm));
 	} else {
 		dev_warn(
-			&intf->dev,
-			"panel size unknown, leaving the input resolution at 0\n");
+		        &intf->dev,
+		        "panel size unknown, leaving the input resolution at 0\n");
 	}
 
 	if (pud_report_touch()) {
 		input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, xmax, 0,
-				     0);
+		                     0);
 		input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, ymax, 0,
-				     0);
+		                     0);
 		if (pud->display && pud->display->width_mm &&
 		    pud->display->height_mm) {
 			input_abs_set_res(
-				input_dev, ABS_MT_POSITION_X,
-				DIV_ROUND_CLOSEST(xmax + 1,
-						  pud->display->width_mm));
+			        input_dev, ABS_MT_POSITION_X,
+			        DIV_ROUND_CLOSEST(xmax + 1,
+			                          pud->display->width_mm));
 			input_abs_set_res(
-				input_dev, ABS_MT_POSITION_Y,
-				DIV_ROUND_CLOSEST(ymax + 1,
-						  pud->display->height_mm));
+			        input_dev, ABS_MT_POSITION_Y,
+			        DIV_ROUND_CLOSEST(ymax + 1,
+			                          pud->display->height_mm));
 		}
 
 		input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
 		__set_bit(INPUT_PROP_DIRECT, input_dev->propbit);
 
 		rc = input_mt_init_slots(
-			input_dev, 1, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
+		        input_dev, 1, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
 		if (rc) {
 			dev_err(&intf->dev, "failed to init MT slots: %d\n",
-				rc);
+			        rc);
 			goto free_buf;
 		}
 	} else {
@@ -237,7 +237,7 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	rc = input_register_device(input_dev);
 	if (rc) {
 		dev_err(&intf->dev, "failed to register input device: %d\n",
-			rc);
+		        rc);
 		goto free_buf;
 	}
 

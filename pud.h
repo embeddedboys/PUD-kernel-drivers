@@ -225,7 +225,7 @@ struct pud {
 };
 
 struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
-				      struct device *dev);
+                                      struct device *dev);
 void pud_framebuffer_release(struct fb_info *info);
 int pud_register_framebuffer(struct fb_info *info);
 
@@ -249,7 +249,7 @@ void pud_caps_to_display(struct pud_display *disp, const struct pud_caps *caps);
 int pud_unregister_framebuffer(struct fb_info *info);
 
 struct drm_device *pud_drm_alloc(struct device *dev,
-				 const struct pud_caps *caps, int caps_len);
+                                 const struct pud_caps *caps, int caps_len);
 void pud_drm_release(struct drm_device *drm);
 int pud_drm_register(struct drm_device *drm);
 void pud_drm_unregister(struct drm_device *drm);
@@ -258,6 +258,6 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id);
 int pud_input_cleanup(struct usb_interface *intf);
 
 ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
-		  const u8 jpeg_data[], size_t data_size);
+                  const u8 jpeg_data[], size_t data_size);
 
 #endif

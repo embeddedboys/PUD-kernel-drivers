@@ -26,7 +26,7 @@
 #define DRV_NAME "pud"
 
 static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
-			size_t len)
+                        size_t len)
 {
 	struct usb_device *udev = pud->udev;
 	int rc, actual_length;
@@ -38,14 +38,14 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
 	pud->ctrl_buf[3] = (len >> 8) & 0xff;
 
 	rc = usb_control_msg(udev, usb_sndctrlpipe(udev, EP0_OUT_ADDR), request,
-			     TYPE_VENDOR | USB_DIR_OUT, 0, 0, pud->ctrl_buf,
-			     sizeof(pud->ctrl_buf), PUD_DEFAULT_TIMEOUT);
+	                     TYPE_VENDOR | USB_DIR_OUT, 0, 0, pud->ctrl_buf,
+	                     sizeof(pud->ctrl_buf), PUD_DEFAULT_TIMEOUT);
 
 	pipe = (addr & USB_DIR_OUT) ? usb_sndbulkpipe(udev, addr) :
-				      usb_rcvbulkpipe(udev, addr);
+	                              usb_rcvbulkpipe(udev, addr);
 
 	rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length,
-			  PUD_DEFAULT_TIMEOUT);
+	                  PUD_DEFAULT_TIMEOUT);
 	if (rc)
 		return rc;
 
@@ -65,7 +65,7 @@ static void pud_usb_bulk_timeout(struct timer_list *t)
 }
 
 ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
-		  const u8 jpeg_data[], size_t data_size)
+                  const u8 jpeg_data[], size_t data_size)
 {
 	struct usb_device *udev = pud->udev;
 	struct pud_usb_bulk_context ctx;
@@ -94,9 +94,9 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 		       data_size);
 
 	rc = usb_sg_init(&ctx.sgr, pud->udev,
-			 usb_sndbulkpipe(udev, EP1_OUT_ADDR), 0,
-			 pud->bulk_sgt.sgl, pud->bulk_sgt.nents,
-			 PUD_EP1_HEADER_SIZE + data_size, GFP_KERNEL);
+	                 usb_sndbulkpipe(udev, EP1_OUT_ADDR), 0,
+	                 pud->bulk_sgt.sgl, pud->bulk_sgt.nents,
+	                 PUD_EP1_HEADER_SIZE + data_size, GFP_KERNEL);
 
 	/* timeout routine in case the device stops reading */
 	timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
@@ -124,17 +124,17 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
      */
 	if (rc < 0 && rc != -ETIMEDOUT) {
 		dev_warn_once(pud->dev,
-			      "EP1 transfer failed (%d), clearing the halt\n",
-			      rc);
+		              "EP1 transfer failed (%d), clearing the halt\n",
+		              rc);
 		usb_clear_halt(pud->udev,
-			       usb_sndbulkpipe(pud->udev, EP1_OUT_ADDR));
+		               usb_sndbulkpipe(pud->udev, EP1_OUT_ADDR));
 	}
 
 	return rc;
 }
 
 static int pud_read_unique_id(struct usb_interface *intf, u8 serial[],
-			      size_t len)
+                              size_t len)
 {
 	struct pud *pud = usb_get_intfdata(intf);
 	int ret;
@@ -148,7 +148,7 @@ static int pud_read_unique_id(struct usb_interface *intf, u8 serial[],
 	// ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
 
 	ret = pud_transfer(pud, PUD_CMD_GET_SN, REQ_EP2_IN, EP2_IN_ADDR, serial,
-			   len);
+	                   len);
 
 	return ret;
 }
@@ -171,7 +171,7 @@ int pud_query_caps(struct usb_device *udev, struct pud_caps *caps)
 
 	tmp->udev = udev;
 	n = pud_transfer(tmp, PUD_CMD_GET_CAPS, REQ_EP2_IN, EP2_IN_ADDR,
-			 (u8 *)caps, sizeof(*caps));
+	                 (u8 *)caps, sizeof(*caps));
 	kfree(tmp);
 
 	if (n < 0)
@@ -216,22 +216,22 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
 
 	if (caps_len < PUD_CAPS_V1_SIZE) {
 		dev_warn(
-			pud->dev,
-			"no capability report (%d bytes); keeping %u pixels per band\n",
-			caps_len, pud->max_band_pixels);
+		        pud->dev,
+		        "no capability report (%d bytes); keeping %u pixels per band\n",
+		        caps_len, pud->max_band_pixels);
 		return;
 	}
 
 	frame_max = min_t(u32, caps->frame_max, USB_TRANS_MAX_SIZE);
 	if (frame_max <= 16) {
 		dev_warn(pud->dev,
-			 "device reports an unusable frame_max (%u)\n",
-			 caps->frame_max);
+		         "device reports an unusable frame_max (%u)\n",
+		         caps->frame_max);
 	} else {
 		pud->frame_max = frame_max;
 		/* the header rides in front of every payload, so it comes off the top */
 		pud->max_band_pixels =
-			(frame_max - PUD_EP1_HEADER_SIZE - 16) / 3;
+		        (frame_max - PUD_EP1_HEADER_SIZE - 16) / 3;
 	}
 
 	pud->decoder_type = caps->decoder_type;
@@ -247,23 +247,23 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
 	}
 
 	dev_info(
-		pud->dev,
-		"caps: proto %u, frame_max %u, decoder %u -> %u pixels per band%s\n",
-		caps->proto_ver, caps->frame_max, caps->decoder_type,
-		pud->max_band_pixels,
-		have_params ? "" : " (old firmware: no panel parameters)");
+	        pud->dev,
+	        "caps: proto %u, frame_max %u, decoder %u -> %u pixels per band%s\n",
+	        caps->proto_ver, caps->frame_max, caps->decoder_type,
+	        pud->max_band_pixels,
+	        have_params ? "" : " (old firmware: no panel parameters)");
 
 	if (have_params)
 		dev_info(
-			pud->dev,
-			"panel: %ux%u, rotation %u, %u bpp, %u kHz, interface %u, %ux%u mm, touch %s\n",
-			pud->display_data.xres, pud->display_data.yres,
-			pud->display_data.rotate, pud->display_data.bpp,
-			pud->display_data.pixelclock_khz, caps->intf_type,
-			pud->display_data.width_mm, pud->display_data.height_mm,
-			pud->has_touch ?
-				"yes" :
-				"no (not compiled into this firmware)");
+		        pud->dev,
+		        "panel: %ux%u, rotation %u, %u bpp, %u kHz, interface %u, %ux%u mm, touch %s\n",
+		        pud->display_data.xres, pud->display_data.yres,
+		        pud->display_data.rotate, pud->display_data.bpp,
+		        pud->display_data.pixelclock_khz, caps->intf_type,
+		        pud->display_data.width_mm, pud->display_data.height_mm,
+		        pud->has_touch ?
+		                "yes" :
+		                "no (not compiled into this firmware)");
 }
 
 /* Fallback panel configuration, and the starting point pud_apply_caps()
@@ -280,9 +280,9 @@ const struct pud_display pud_default_display = {
 };
 
 static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
-				       const struct usb_device_id *id,
-				       const struct pud_caps *caps,
-				       int caps_len)
+                                       const struct usb_device_id *id,
+                                       const struct pud_caps *caps,
+                                       int caps_len)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct device *dev = &intf->dev;
@@ -311,8 +311,8 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	pud_apply_caps(pud, caps, caps_len);
 
 	pud->encoder_buf = dma_alloc_coherent(
-		pud->dev, info->var.xres * info->var.yres * 2,
-		&pud->encoder_dma, GFP_KERNEL);
+	        pud->dev, info->var.xres * info->var.yres * 2,
+	        &pud->encoder_dma, GFP_KERNEL);
 	if (!pud->encoder_buf)
 		return -ENOMEM;
 	pud->encoder_buf_size = info->var.xres * info->var.yres * 2;
@@ -341,16 +341,16 @@ static void __maybe_unused pud_fb_cleanup(struct usb_interface *intf)
 	pud_framebuffer_release(pud->info);
 	if (pud->encoder_buf) {
 		dma_free_coherent(pud->dev, pud->encoder_buf_size,
-				  pud->encoder_buf, pud->encoder_dma);
+		                  pud->encoder_buf, pud->encoder_dma);
 		pud->encoder_buf = NULL;
 		pud->encoder_buf_size = 0;
 	}
 }
 
 static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
-					const struct usb_device_id *id,
-					const struct pud_caps *caps,
-					int caps_len)
+                                        const struct usb_device_id *id,
+                                        const struct pud_caps *caps,
+                                        int caps_len)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct device *dev = &intf->dev;
@@ -401,7 +401,7 @@ static void __maybe_unused pud_drm_cleanup(struct usb_interface *intf)
 static bool input_only;
 module_param(input_only, bool, 0444);
 MODULE_PARM_DESC(input_only,
-		 "register only the touch input device, without a display");
+                 "register only the touch input device, without a display");
 #else
 #define input_only false
 #endif
@@ -427,8 +427,8 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	caps_len = pud_query_caps(udev, caps);
 	if (caps_len < 0) {
 		dev_warn(&intf->dev,
-			 "no capability report (%d), using defaults\n",
-			 caps_len);
+		         "no capability report (%d), using defaults\n",
+		         caps_len);
 		caps_len = 0;
 	}
 
@@ -459,8 +459,8 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		pud_read_unique_id(intf, serial, 8);
 
 		pr_info("sn : 0x%02x%02x%02x%02x%02x%02x%02x%02x\n", serial[0],
-			serial[1], serial[2], serial[3], serial[4], serial[5],
-			serial[6], serial[7]);
+		        serial[1], serial[2], serial[3], serial[4], serial[5],
+		        serial[6], serial[7]);
 	}
 
 #if PUD_ENABLE_INPUT_SUPPORT
@@ -476,11 +476,11 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		rc = pud_input_setup(intf, id);
 		if (rc)
 			dev_warn(&intf->dev, "touch input not available: %d\n",
-				 rc);
+			         rc);
 	} else {
 		dev_info(
-			&intf->dev,
-			"device reports no touch controller, not registering input\n");
+		        &intf->dev,
+		        "device reports no touch controller, not registering input\n");
 	}
 #endif
 
@@ -511,7 +511,7 @@ static void pud_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_device_id pud_ids[] = { { USB_DEVICE(0x2E8A, 0x0001) },
-					  { /* KEEP THIS */ } };
+	                                  { /* KEEP THIS */ } };
 MODULE_DEVICE_TABLE(usb, pud_ids);
 
 static struct usb_driver pud_drv = {

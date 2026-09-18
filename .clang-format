@@ -680,5 +680,9 @@ SpacesInParentheses: false
 SpacesInSquareBrackets: false
 Standard: Cpp03
 TabWidth: 8
-UseTab: Always
+# Deviation from the kernel's own file: it says "Always", which makes
+# clang-format align with tabs as well -- the visual result then depends on
+# the editor's tab width, and checkpatch's rule is tabs for indentation,
+# spaces for alignment.
+UseTab: ForIndentation
 ...

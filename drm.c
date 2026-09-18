@@ -28,7 +28,7 @@ static inline struct pud *drm_to_pud(struct drm_device *drm)
 
 static enum drm_mode_status
 pud_drm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
-			const struct drm_display_mode *mode)
+                        const struct drm_display_mode *mode)
 {
 	struct pud *pud = drm_to_pud(pipe->crtc.dev);
 	int rc;
@@ -38,8 +38,8 @@ pud_drm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 }
 
 static void pud_drm_pipe_enable(struct drm_simple_display_pipe *pipe,
-				struct drm_crtc_state *crtc_state,
-				struct drm_plane_state *plane_state)
+                                struct drm_crtc_state *crtc_state,
+                                struct drm_plane_state *plane_state)
 {
 	pr_info("%s\n", __func__);
 }
@@ -50,8 +50,8 @@ static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
 }
 
 static int pud_buf_copy(void *dst, struct iosys_map *src,
-			struct drm_framebuffer *fb, struct drm_rect *clip,
-			bool swap)
+                        struct drm_framebuffer *fb, struct drm_rect *clip,
+                        bool swap)
 {
 	struct pud *pud = drm_to_pud(fb->dev);
 	// struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
@@ -77,7 +77,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 		switch (pud->pixel_format) {
 		case DRM_FORMAT_RGB565:
 			drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip,
-						  swap);
+			                          swap);
 			break;
 			// case DRM_FORMAT_RGB888:
 			//     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
@@ -86,7 +86,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 		break;
 	default:
 		drm_err_once(fb->dev, "Format is not supported: %p4cc\n",
-			     &fb->format->format);
+		             &fb->format->format);
 		ret = -EINVAL;
 	}
 
@@ -116,7 +116,7 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
  * report anything.
  */
 static int pud_encode_band(struct pud *pud, unsigned int width,
-			   unsigned int height, size_t *out_size)
+                           unsigned int height, size_t *out_size)
 {
 	u8 *out = pud->encoder_buf + PUD_EP1_HEADER_SIZE;
 	size_t capacity = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
@@ -124,17 +124,17 @@ static int pud_encode_band(struct pud *pud, unsigned int width,
 	switch (pud->decoder_type) {
 	case PUD_DECODER_QOI:
 		return qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
-					 capacity, out, out_size);
+		                         capacity, out, out_size);
 	case PUD_DECODER_RLE:
 		return rle_encode_rgb565((u8 *)pud->tx_buf, width, height,
-					 capacity, out, out_size);
+		                         capacity, out, out_size);
 	default:
 		return -EOPNOTSUPP;
 	}
 }
 
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
-			 struct drm_rect *rect)
+                         struct drm_rect *rect)
 {
 	struct pud *pud = drm_to_pud(fb->dev);
 	struct drm_rect band;
@@ -170,19 +170,19 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 		if (ret) {
 			if (ret == -EOPNOTSUPP)
 				drm_err_once(
-					fb->dev,
-					"device decodes decoder_type %u, which this driver cannot encode\n",
-					pud->decoder_type);
+				        fb->dev,
+				        "device decodes decoder_type %u, which this driver cannot encode\n",
+				        pud->decoder_type);
 			else
 				drm_err_once(fb->dev,
-					     "band encode failed: %d\n", ret);
+				             "band encode failed: %d\n", ret);
 			pud->needs_full_refresh = true;
 			return;
 		}
 
 		ret = pud_flush(pud, band.x1, band.y1, band.x2 - 1, band.y2 - 1,
-				pud->encoder_buf + PUD_EP1_HEADER_SIZE,
-				encoded);
+		                pud->encoder_buf + PUD_EP1_HEADER_SIZE,
+		                encoded);
 		if (ret < 0) {
 			/* The frame did not reach the display: those pixels would stay
              * stale until the application happens to redraw them. Ask for a
@@ -195,11 +195,11 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 }
 
 static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
-				struct drm_plane_state *old_state)
+                                struct drm_plane_state *old_state)
 {
 	struct drm_plane_state *state = pipe->plane.state;
 	struct drm_shadow_plane_state *shadow_plane_state =
-		to_drm_shadow_plane_state(state);
+	        to_drm_shadow_plane_state(state);
 	struct drm_framebuffer *fb = state->fb;
 	struct drm_rect rect;
 	struct pud *pud;
@@ -225,7 +225,7 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 			drm_rect_init(&rect, 0, 0, fb->width, fb->height);
 		}
 		drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n",
-			fb->base.id, DRM_RECT_ARG(&rect));
+		        fb->base.id, DRM_RECT_ARG(&rect));
 		pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
 	}
 
@@ -266,7 +266,7 @@ static u8 pud_edid[128];
 static void pud_edid_build(unsigned int width_mm, unsigned int height_mm)
 {
 	static const u8 header[8] = { 0x00, 0xff, 0xff, 0xff,
-				      0xff, 0xff, 0xff, 0x00 };
+		                      0xff, 0xff, 0xff, 0x00 };
 	u8 sum = 0;
 	int i;
 
@@ -345,7 +345,7 @@ static const uint32_t pud_drm_formats[] = {
  * driver follows whatever panel the firmware drives.
  */
 static void pud_mode_init(struct drm_display_mode *mode,
-			  const struct pud_display *disp)
+                          const struct pud_display *disp)
 {
 	*mode = (struct drm_display_mode){ DRM_MODE_INIT(
 		60, disp->xres, disp->yres, disp->width_mm ?: 85,
@@ -366,12 +366,12 @@ static const struct drm_driver pud_drm_driver = {
 };
 
 static int pud_drm_dev_init_with_formats(
-	struct pud *pud, const struct drm_simple_display_pipe_funcs *funcs,
-	const uint32_t *formats, unsigned int formats_count,
-	const struct drm_display_mode *mode, size_t tx_buf_size)
+        struct pud *pud, const struct drm_simple_display_pipe_funcs *funcs,
+        const uint32_t *formats, unsigned int formats_count,
+        const struct drm_display_mode *mode, size_t tx_buf_size)
 {
 	static const uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR,
-					      DRM_FORMAT_MOD_INVALID };
+		                              DRM_FORMAT_MOD_INVALID };
 	struct drm_device *drm = &pud->drm;
 	struct page **pages;
 	unsigned int i, num_pages;
@@ -401,11 +401,11 @@ static int pud_drm_dev_init_with_formats(
      * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
      */
 	enc_size = rgb565_qoi_max_compressed_size((size_t)mode->hdisplay *
-						  mode->vdisplay);
+	                                          mode->vdisplay);
 	if (!enc_size)
 		return -EINVAL;
 	pud->encoder_buf = dma_alloc_coherent(drm->dev, enc_size,
-					      &pud->encoder_dma, GFP_KERNEL);
+	                                      &pud->encoder_dma, GFP_KERNEL);
 	if (!pud->encoder_buf)
 		return -ENOMEM;
 	pud->encoder_buf_size = enc_size;
@@ -420,7 +420,7 @@ static int pud_drm_dev_init_with_formats(
 		pages[i] = vmalloc_to_page(ptr);
 
 	rc = sg_alloc_table_from_pages(&pud->bulk_sgt, pages, num_pages, 0,
-				       enc_size, GFP_KERNEL);
+	                               enc_size, GFP_KERNEL);
 	kfree(pages);
 	if (rc)
 		return rc;
@@ -436,7 +436,7 @@ static int pud_drm_dev_init_with_formats(
 
 	drm_connector_helper_add(&pud->connector, &pud_connector_hfuncs);
 	rc = drm_connector_init(drm, &pud->connector, &pud_connector_funcs,
-				DRM_MODE_CONNECTOR_USB);
+	                        DRM_MODE_CONNECTOR_USB);
 	if (rc) {
 		pr_err("failed to init connector\n");
 		return rc;
@@ -457,32 +457,32 @@ static int pud_drm_dev_init_with_formats(
 		unsigned int rx, ry;
 
 		rx = DIV_ROUND_CLOSEST(pud->display->xres,
-				       pud->display->width_mm);
+		                       pud->display->width_mm);
 		ry = DIV_ROUND_CLOSEST(pud->display->yres,
-				       pud->display->height_mm);
+		                       pud->display->height_mm);
 		if (rx && ry) {
 			pud->connector.display_info.width_mm =
-				DIV_ROUND_CLOSEST(pud->display->xres, rx);
+			        DIV_ROUND_CLOSEST(pud->display->xres, rx);
 			pud->connector.display_info.height_mm =
-				DIV_ROUND_CLOSEST(pud->display->yres, ry);
+			        DIV_ROUND_CLOSEST(pud->display->yres, ry);
 			pr_info("panel size for input mapping: %ux%u mm\n",
-				pud->connector.display_info.width_mm,
-				pud->connector.display_info.height_mm);
+			        pud->connector.display_info.width_mm,
+			        pud->connector.display_info.height_mm);
 		}
 	}
 
 	/* Give the output an identity, so a compositor can tell which output the
      * touchscreen belongs to (see pud_edid_build()). */
 	pud_edid_build(pud->display->width_mm ?: 74,
-		       pud->display->height_mm ?: 49);
+	               pud->display->height_mm ?: 49);
 	rc = drm_connector_update_edid_property(&pud->connector,
-						(const struct edid *)pud_edid);
+	                                        (const struct edid *)pud_edid);
 	if (rc)
 		pr_warn("failed to attach the panel EDID: %d\n", rc);
 
 	rc = drm_simple_display_pipe_init(drm, &pud->pipe, funcs, formats,
-					  formats_count, modifiers,
-					  &pud->connector);
+	                                  formats_count, modifiers,
+	                                  &pud->connector);
 	if (rc) {
 		pr_err("failed to init pipe\n");
 		return rc;
@@ -503,8 +503,8 @@ static int pud_drm_dev_init_with_formats(
 }
 
 static int pud_drm_dev_init(struct pud *pud,
-			    const struct drm_simple_display_pipe_funcs *funcs,
-			    const struct drm_display_mode *mode)
+                            const struct drm_simple_display_pipe_funcs *funcs,
+                            const struct drm_display_mode *mode)
 {
 	ssize_t bufsize = mode->vdisplay * mode->hdisplay * sizeof(u16);
 
@@ -513,8 +513,8 @@ static int pud_drm_dev_init(struct pud *pud,
 	pr_info("%s\n", __func__);
 
 	return pud_drm_dev_init_with_formats(pud, funcs, pud_drm_formats,
-					     ARRAY_SIZE(pud_drm_formats), mode,
-					     bufsize);
+	                                     ARRAY_SIZE(pud_drm_formats), mode,
+	                                     bufsize);
 }
 
 static void pud_drm_release_buffers(struct pud *pud)
@@ -522,7 +522,7 @@ static void pud_drm_release_buffers(struct pud *pud)
 	sg_free_table(&pud->bulk_sgt);
 	if (pud->encoder_buf) {
 		dma_free_coherent(pud->drm.dev, pud->encoder_buf_size,
-				  pud->encoder_buf, pud->encoder_dma);
+		                  pud->encoder_buf, pud->encoder_dma);
 		pud->encoder_buf = NULL;
 		pud->encoder_buf_size = 0;
 	}
@@ -533,7 +533,7 @@ static void pud_drm_release_buffers(struct pud *pud)
 }
 
 struct drm_device *pud_drm_alloc(struct device *dev,
-				 const struct pud_caps *caps, int caps_len)
+                                 const struct pud_caps *caps, int caps_len)
 {
 	struct drm_display_mode mode;
 	struct pud *pud;

@@ -27,14 +27,14 @@ struct dirty_area {
 };
 
 static ssize_t pud_fb_read(struct fb_info *info, char __user *buf, size_t count,
-			   loff_t *ppos)
+                           loff_t *ppos)
 {
 	pr_info("%s\n", __func__);
 	return fb_sys_read(info, buf, count, ppos);
 }
 
 static ssize_t pud_fb_write(struct fb_info *info, const char __user *buf,
-			    size_t count, loff_t *ppos)
+                            size_t count, loff_t *ppos)
 {
 	ssize_t ret = 0;
 	pr_info("%s: count=%zd, ppos=%llu\n", __func__, count, *ppos);
@@ -44,14 +44,14 @@ static ssize_t pud_fb_write(struct fb_info *info, const char __user *buf,
 }
 
 static void pud_fb_fillrect(struct fb_info *info,
-			    const struct fb_fillrect *rect)
+                            const struct fb_fillrect *rect)
 {
 	pr_info("%s\n", __func__);
 	sys_fillrect(info, rect);
 }
 
 static void pud_fb_copyarea(struct fb_info *info,
-			    const struct fb_copyarea *area)
+                            const struct fb_copyarea *area)
 {
 	pr_info("%s\n", __func__);
 	sys_copyarea(info, area);
@@ -72,14 +72,14 @@ static unsigned int chan_to_field(unsigned int chan, struct fb_bitfield *bf)
 }
 
 static int pud_fb_setcolreg(unsigned int regno, unsigned int red,
-			    unsigned int green, unsigned int blue,
-			    unsigned int transp, struct fb_info *info)
+                            unsigned int green, unsigned int blue,
+                            unsigned int transp, struct fb_info *info)
 {
 	unsigned int val;
 	int ret = 1;
 
 	pr_info("%s(regno=%u, red=0x%X, green=0x%X, blue=0x%X, trans=0x%X)\n",
-		__func__, regno, red, green, blue, transp);
+	        __func__, regno, red, green, blue, transp);
 
 	return 0;
 
@@ -121,7 +121,7 @@ static int pud_fb_blank(int blank, struct fb_info *info)
 }
 
 static void pud_fb_deferred_io(struct fb_info *info,
-			       struct list_head *pagereflist)
+                               struct list_head *pagereflist)
 {
 	ssize_t jpeg_length = 0;
 	// struct fb_deferred_io_pageref *pageref;
@@ -150,13 +150,13 @@ static void pud_fb_deferred_io(struct fb_info *info,
 		area.x2 = info->var.xres - 1;
 
 	pr_info("%s, dirty area: (%d, %d, %d, %d)\n", __func__, area.x1,
-		area.y1, area.x2, area.y2);
+	        area.y1, area.x2, area.y2);
 #endif
 
 	jpeg_encode_rgb565(info->screen_buffer, info->var.xres, info->var.yres,
-			   info->fix.line_length * info->var.yres,
-			   pud->encoder_buf + PUD_EP1_HEADER_SIZE, &jpeg_length,
-			   pud->encoder_quality);
+	                   info->fix.line_length * info->var.yres,
+	                   pud->encoder_buf + PUD_EP1_HEADER_SIZE, &jpeg_length,
+	                   pud->encoder_quality);
 
 	/* A JPEG of the whole screen goes out as one transfer, so it has to fit
      * what the device accepts.  Truncating it (which is what the old clamp to
@@ -165,18 +165,18 @@ static void pud_fb_deferred_io(struct fb_info *info,
      * not have this limit. */
 	if (jpeg_length + PUD_EP1_HEADER_SIZE > (ssize_t)pud->frame_max) {
 		dev_err_once(
-			pud->dev,
-			"full-screen JPEG is %zd bytes, device accepts %u; not sending\n",
-			jpeg_length, pud->frame_max);
+		        pud->dev,
+		        "full-screen JPEG is %zd bytes, device accepts %u; not sending\n",
+		        jpeg_length, pud->frame_max);
 		return;
 	}
 
 	pud_flush(pud, 0, 0, info->var.xres - 1, info->var.yres - 1,
-		  pud->encoder_buf + PUD_EP1_HEADER_SIZE, jpeg_length);
+	          pud->encoder_buf + PUD_EP1_HEADER_SIZE, jpeg_length);
 }
 
 struct fb_info *pud_framebuffer_alloc(struct pud_display *display,
-				      struct device *dev)
+                                      struct device *dev)
 {
 	struct fb_deferred_io *fbdefio;
 	struct fb_ops *fbops;
