@@ -47,7 +47,7 @@ pud_drm_pipe_update()                drm.c
    │  drm_atomic_helper_damage_merged() → 得到本次变化的包围盒
    ▼
 pud_fb_dirty()                       drm.c
-   │  ① 按行分带（每带 ≤ PUD_MAX_BAND_PIXELS 像素）
+   │  ① 按行分带（每带 ≤ pud->max_band_pixels 像素，值由设备上报）
    │  ② pud_buf_copy() 把该带转成 RGB565，放进 pud->tx_buf
    │  ③ qoi_encode_rgb565() 编码进 pud->encoder_buf
    ▼
@@ -73,7 +73,7 @@ static struct usb_device_id pud_ids[] = {
 ```
 
 `MODULE_DEVICE_TABLE(usb, pud_ids)` 让 udev 能自动加载。固件上报的 `SerialNumber` 是固定串
-（`usb.c` 里通过 `REQ_EP2_IN`/`pud_CMD_GET_SN` 读到的 8 字节板子唯一 ID，仅打印到 dmesg 用）。
+（`usb.c` 里通过 `REQ_EP2_IN`/`PUD_CMD_GET_SN` 读到的 8 字节板子唯一 ID，仅打印到 dmesg 用）。
 
 ## 与固件的对应关系
 

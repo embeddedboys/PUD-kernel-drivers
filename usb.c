@@ -172,9 +172,52 @@ static int pud_read_unique_id(struct usb_interface *intf, u8 serial[], size_t le
     // /* Dummy read, device need to prepares data */
     // ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
 
-    ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
+    ret = pud_transfer(pud, PUD_CMD_GET_SN, REQ_EP2_IN, EP2_IN_ADDR, serial,
+                       len);
 
     return ret;
+}
+
+/* Ask the device how large a single transfer may be (PUD_CMD_GET_CAPS).  The
+ * answer sizes the bands pud_fb_dirty() splits a rectangle into, which is what
+ * keeps one encoded band inside the device's frame slot.  A device without the
+ * command replies with whatever was left in its buffer, so the magic decides;
+ * on any mismatch the conservative host-side default stands. */
+static void pud_read_caps(struct pud *pud)
+{
+    struct pud_caps *caps = (struct pud_caps *)pud->ctrl_buf;
+    unsigned int frame_max;
+    int n;
+
+    BUILD_BUG_ON(sizeof(struct pud_caps) > sizeof(pud->ctrl_buf));
+
+    /* Defaults in case the device stays silent. */
+    pud->frame_max = USB_TRANS_MAX_SIZE;
+    pud->max_band_pixels = PUD_DEFAULT_BAND_PIXELS;
+
+    n = pud_transfer(pud, PUD_CMD_GET_CAPS, REQ_EP2_IN, EP2_IN_ADDR,
+                     pud->ctrl_buf, sizeof(*caps));
+    if (n != sizeof(*caps) || caps->magic != PUD_CAPS_MAGIC) {
+        dev_warn(pud->dev,
+                 "no capability report (%d bytes, magic %#x); keeping %u pixels per band\n",
+                 n, caps->magic, pud->max_band_pixels);
+        return;
+    }
+
+    frame_max = min_t(u32, caps->frame_max, USB_TRANS_MAX_SIZE);
+    if (frame_max <= 16) {
+        dev_warn(pud->dev, "device reports an unusable frame_max (%u)\n",
+                 caps->frame_max);
+        return;
+    }
+
+    pud->frame_max = frame_max;
+    pud->max_band_pixels = (frame_max - 16) / 3;
+    pud->decoder_type = caps->decoder_type;
+    dev_info(pud->dev,
+             "caps: proto %u, frame_max %u, decoder %u -> %u pixels per band\n",
+             caps->proto_ver, caps->frame_max, caps->decoder_type,
+             pud->max_band_pixels);
 }
 
 static int pud_bmp_blit(struct pud *pud, uint8_t *bmp, size_t len)
@@ -348,6 +391,9 @@ static int pud_probe(struct usb_interface *intf,
                                                         serial[2], serial[3],
                                                         serial[4], serial[5],
                                                         serial[6], serial[7]);
+
+    /* Device limits (transfer size / band budget) before anything flushes. */
+    pud_read_caps(usb_get_intfdata(intf));
 
 #if pud_ENABLE_INPUT_SUPPORT
     pud_input_setup(intf, id);

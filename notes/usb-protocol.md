@@ -102,14 +102,15 @@ QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会�
 
 | 常量 | 值 | 位置 | 含义 |
 | --- | --- | --- | --- |
-| `USB_TRANS_MAX_SIZE` | 65535 | 驱动 `pud.h` | 单次 `size` 的上限（受 `u16`/协议约束） |
-| `PUD_MAX_BAND_PIXELS` | `(65535-16)/3` = 21839 | 驱动 `drm.c` | 单带像素数上限（QOI 最坏 3 字节/像素） |
-| `DECODER_FRAME_MAX` | 65536 | 固件 `decoder.c` | 固件单个帧槽容量 |
-| `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲） |
-| `EP1_RD_BUF_SIZE` | 131072 | 固件 `usbd_vendor.h` | EP1 接收缓冲 |
+| `USB_TRANS_MAX_SIZE` | 65535 | 驱动 `pud.h` | 主机侧单次 `size` 上限（受 `u16`/协议约束） |
+| `PUD_DEFAULT_BAND_PIXELS` | `(65535-16)/3` = 21839 | 驱动 `pud.h` | 拿不到能力报告时的兜底单带像素数 |
+| `pud->max_band_pixels` | 21839（RP2350） | 驱动 `drm.c` | **实际使用的**单带上限，来自 `PUD_CMD_GET_CAPS` |
+| `PUD_MAX_TRANSFER` | 65536 / 32768 | 固件 `usbd_vendor.h` | **按板子**定的单次传输与帧槽上限（RP2350 / RP2040） |
+| `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲，尺寸 = `PUD_MAX_TRANSFER`） |
 
-**关键约束**：一帧的压缩结果必须 ≤ `DECODER_FRAME_MAX`（65536），否则固件侧会被截断。
-驱动就是靠分带（见 [display-and-refresh.md](display-and-refresh.md)）保证这一点的。
+**关键约束**：一帧的压缩结果必须 ≤ **设备上报的** `frame_max`。固件在 REQ_EP1_OUT
+控制阶段就会校验（超限直接 stall EP0，见 `usbd_vendor_ep1_size_ok()`），不再静默截断。
+驱动靠分带（见 [display-and-refresh.md](display-and-refresh.md)）保证这一点。
 
 ### 流控（很重要）
 
@@ -144,10 +145,39 @@ usb_bulk_msg(udev, usb_rcvbulkpipe(udev, EP2_IN_ADDR), data, len, &actual_length
 
 | cmd | 名称 | 响应 |
 | --- | --- | --- |
-| `0x01` | `pud_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 |
+| `0x01` | `PUD_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 |
+| `0x02` | `PUD_CMD_GET_CAPS` | 16 字节 `struct pud_caps`（magic / proto_ver / frame_max / decoder_type） |
+| 其他 | — | 固件回**零长度包**（主机读回短包 → 判定不支持） |
 
-驱动侧调用点在 `pud_read_unique_id()`，由 `pud_probe()` 在注册显示设备**之后**调用，
-结果只 `pr_info` 打印，不参与逻辑。
+驱动侧调用点：`pud_read_unique_id()` 与 `pud_read_caps()`，都由 `pud_probe()` 在注册
+显示设备之后调用。
+
+### `PUD_CMD_GET_CAPS`：设备上报自己的传输上限
+
+```c
+struct pud_caps {
+    u32 magic;          /* PUD_CAPS_MAGIC = 0x43445550 ("PUDC") */
+    u32 proto_ver;      /* PUD_PROTO_VER = 1 */
+    u32 frame_max;      /* 单次 EP1 传输上限：RP2350 65536，RP2040 32768 */
+    u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI */
+};
+```
+
+用途：**分带大小由设备决定**，不再写死在驱动里。固件侧同一个数字决定
+`EP1_RD_BUF_SIZE` 和帧槽大小（`PUD_MAX_TRANSFER`），而它按板子不同 —— RP2040 只有
+256 KB SRAM，塞不下 RP2350 的 128 KB + 2×64 KB。这样一份驱动就能同时服务两种板子。
+
+- `pud_read_caps()` 把结果落到 `pud->frame_max` / `pud->max_band_pixels`
+  （= `(min(USB_TRANS_MAX_SIZE, frame_max) - 16) / 3`，QOI 最坏 3 B/px + 16 B 头尾），
+  `pud_fb_dirty()` 用它算 `rows`。
+- 响应缓冲直接用 `pud->ctrl_buf`（16 B，嵌在堆上的 `struct pud` 里 → DMA 可映射 ✓，
+  符合"传输 buffer 不能是栈"的约束），并 `BUILD_BUG_ON` 保证结构体不超过它。
+- **必须校验 `magic`**：老固件没有这条命令，会用 EP2 缓冲里的残留内容应答
+  （实测新固件上 `cmd=0x7f` 曾把上一次的 caps 原样发回），所以"收到 16 字节"不等于
+  "设备支持该命令"。magic 不匹配就保留 `PUD_DEFAULT_BAND_PIXELS` 并 `dev_warn`。
+- RP2350 上 `frame_max=65536` 经 `min(65535, …)` 得到 21839 px/band，与改前的编译期
+  常量**逐字节相同** → 行为零变化（真机实测 `caps: proto 1, frame_max 65536,
+  decoder 3 -> 21839 pixels per band`）。
 
 ## 修改协议时的检查清单
 

@@ -52,9 +52,12 @@
    - `pud_flush()` 里栈上的 `struct pud_usb_bulk_context` 是**描述符不是 buffer**，
      合法 —— 别"顺手"改成堆分配。
 2. **`pud_drm_alloc()` 失败返回 `ERR_PTR`，必须 `IS_ERR()` 判断**，不能用 `if (!drm)`。
-3. **一帧的压缩结果必须 ≤ 固件帧槽 65536 B**，靠 `pud_fb_dirty()` 的分带
-   （`PUD_MAX_BAND_PIXELS`）保证。改分带规则前先读
-   [`notes/display-and-refresh.md`](notes/display-and-refresh.md)。
+3. **一帧的压缩结果必须 ≤ 设备上报的单次传输上限**，靠 `pud_fb_dirty()` 的分带
+   （`pud->max_band_pixels`）保证。这个上限**由设备通过 `PUD_CMD_GET_CAPS` 上报**
+   （真机日志 `caps: proto 1, frame_max 65536, decoder 3 -> 21839 pixels per band`），
+   拿不到时退回 `PUD_DEFAULT_BAND_PIXELS`（21839 px）。
+   **不要把它改回写死的常量** —— RP2040 的固件只接受一半大小的传输。
+   改分带规则前先读 [`notes/display-and-refresh.md`](notes/display-and-refresh.md)。
 4. **flush 失败必须置 `needs_full_refresh`**，否则那块 damage 永久丢失 = 残影。
 5. **协议字段改动要成对改固件**（`REQ_*`、`struct req_ep1_out`、`struct req_ep2_in`），
    并同步两个仓库的 `notes/usb-protocol.md`。
@@ -63,8 +66,9 @@
 
 - 部署：`scp pud.ko` 到板子 → 跑 `loadN.sh`。**加载脚本要先校验 md5**，
   曾因传了旧 `.ko` 白折腾一整轮。
-- `rmmod` 常失败（`Module is in use`）：合成器持有 `/dev/dri/card*`。
-  **可靠的重置是重启板子**；`systemctl stop gdm`、解绑 vtconsole 不一定管用。
+- `rmmod` 常失败（`Module is in use`）：`lsof /dev/dri/*` 会看到 **logind + gnome-shell**
+  持有 `/dev/dri/card*`。**实测有效**的做法是先 `systemctl stop gdm`，`rmmod` 成功后再
+  `systemctl start gdm`（不用重启板子）；重启仍是最后的兜底。
 - **fbdev 编号不固定**：PUD 可能是 `fb0` 也可能是 `fb1`。用
   `cat /sys/class/graphics/fb*/name` 找 `pud-drmdrmfb`，不要写死。
 - 要看固件内部状态（解码计数等）走 CMSIS-DAP：OpenOCD 跑在 **Windows 宿主机**，

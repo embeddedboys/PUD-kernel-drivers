@@ -74,17 +74,32 @@ drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
 
 ### 分带（band splitting）
 
-单次传输的 `size` 字段受 `USB_TRANS_MAX_SIZE`（65535）约束，而一帧的 QOI 最坏情况是
+单次传输的 `size` 字段受 **设备实际上限**约束，而一帧的 QOI 最坏情况是
 **3 字节/像素**。所以按像素数切带：
 
 ```c
-#define PUD_MAX_BAND_PIXELS ((USB_TRANS_MAX_SIZE - 16) / 3)   /* = 21839 */
+/* pud->max_band_pixels 由 PUD_CMD_GET_CAPS 在 probe 时问设备得到：
+ *   min(USB_TRANS_MAX_SIZE, caps.frame_max) - 16) / 3
+ * 拿不到能力报告时退回 PUD_DEFAULT_BAND_PIXELS (= 21839)。 */
 
-rows = PUD_MAX_BAND_PIXELS / (rect->x2 - rect->x1);           /* 每条带的行数 */
+rows = pud->max_band_pixels / (rect->x2 - rect->x1);          /* 每条带的行数 */
 if (rows < 1) rows = 1;
 
 for (y = rect->y1; y < rect->y2; y += rows) { ... }
 ```
+
+**为什么是设备说了算**：同一个数字决定固件侧的 `EP1_RD_BUF_SIZE` 与帧槽大小
+（`PUD_MAX_TRANSFER`），而它按板子不同 —— RP2350 是 64 KB，RP2040 只有 256 KB SRAM
+所以是 32 KB。写死在驱动里的话，一份模块就不可能同时服务两种板子。
+真机日志（RP2350）：
+
+```
+pud 7-1:1.0: caps: proto 1, frame_max 65536, decoder 3 -> 21839 pixels per band
+```
+
+65536 经 `min(USB_TRANS_MAX_SIZE=65535, …)` 得到 21839 px —— 与旧版编译期常量
+**逐字节相同**，所以这次改动在 RP2350 上不改变任何分带行为。协议细节见
+[usb-protocol.md](usb-protocol.md)。
 
 每条带**独立编码、独立 `pud_flush()`**，坐标是真实带边界（`band.y2 - 1` 作为 `ye`）。
 

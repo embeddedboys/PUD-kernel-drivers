@@ -44,6 +44,27 @@
 // TODO: Currently only support less than 40000 bytes transfer
 #define USB_TRANS_MAX_SIZE  65535
 
+/* Conservative band budget: one transfer of the host-side ceiling, QOI worst
+ * case (3 bytes per pixel plus the 8-byte header and 8-byte end marker).  Used
+ * until the device reports its own limit through PUD_CMD_GET_CAPS; an RP2040
+ * firmware accepts half-size transfers, so the reported value must win. */
+#define PUD_DEFAULT_BAND_PIXELS ((USB_TRANS_MAX_SIZE - 16) / 3)
+
+/* Device capability report (PUD_CMD_GET_CAPS, EP2 IN).  Must match the
+ * firmware's struct in the Pico-USB-Display repo (include/pud.h). */
+#define PUD_CAPS_MAGIC 0x43445550 /* "PUDC" */
+#define PUD_PROTO_VER  1
+
+#define PUD_CMD_GET_SN   0x01
+#define PUD_CMD_GET_CAPS 0x02
+
+struct pud_caps {
+    u32 magic;
+    u32 proto_ver;
+    u32 frame_max;      /* max bytes the device accepts in one EP1 transfer */
+    u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI */
+};
+
 #define pud_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
 
 #define EP0_IN_ADDR  (USB_DIR_IN  | 0)
@@ -77,6 +98,14 @@ struct pud {
     struct usb_device      *udev;
     struct usb_interface   *intf;
     bool                    disconnected;
+
+    /* Device limits, from PUD_CMD_GET_CAPS at probe.  frame_max is the largest
+     * single EP1 transfer the device accepts and max_band_pixels the matching
+     * band budget used by pud_fb_dirty(); both fall back to the host-side
+     * defaults when the device does not report anything. */
+    u32 frame_max;
+    u32 max_band_pixels;
+    u32 decoder_type;
 
     /* Framebuffer specific data */
     struct fb_info        *info;

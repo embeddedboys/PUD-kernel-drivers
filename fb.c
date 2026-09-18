@@ -153,8 +153,17 @@ static void pud_fb_deferred_io(struct fb_info *info, struct list_head *pagerefli
                 info->fix.line_length * info->var.yres, pud->encoder_buf,
                 &jpeg_length, pud->encoder_quality);
 
-    if (jpeg_length > USB_TRANS_MAX_SIZE)
-        jpeg_length = USB_TRANS_MAX_SIZE - 1;
+    /* A JPEG of the whole screen goes out as one transfer, so it has to fit
+     * what the device accepts.  Truncating it (which is what the old clamp to
+     * USB_TRANS_MAX_SIZE did) produced a corrupt stream that the device decoded
+     * as garbage; fail loudly instead.  The DRM backend bands instead and does
+     * not have this limit. */
+    if (jpeg_length > (ssize_t)pud->frame_max) {
+        dev_err_once(pud->dev,
+                     "full-screen JPEG is %zd bytes, device accepts %u; not sending\n",
+                     jpeg_length, pud->frame_max);
+        return;
+    }
 
     pud_flush(pud, 0, 0, info->var.xres - 1, info->var.yres - 1,
               pud->encoder_buf, jpeg_length);

@@ -104,10 +104,12 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
  * A rectangle whose QOI stream might not fit the USB transfer limit is split
  * into horizontal bands and each band is encoded and flushed on its own. The
  * QOI worst case is 3 bytes per pixel, so a band of at most
- * PUD_MAX_BAND_PIXELS pixels always fits.
+ * pud->max_band_pixels pixels always fits.  That budget comes from the device
+ * (PUD_CMD_GET_CAPS, see pud_read_caps()) because it depends on how much RAM
+ * the firmware has: an RP2040 accepts half-size transfers, an RP2350 the full
+ * 64 KB.  It falls back to PUD_DEFAULT_BAND_PIXELS when the device does not
+ * report anything.
  */
-#define PUD_MAX_BAND_PIXELS ((USB_TRANS_MAX_SIZE - 16) / 3)
-
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
                          struct drm_rect *rect)
 {
@@ -121,7 +123,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
     if (rect->x2 <= rect->x1 || rect->y2 <= rect->y1)
         return;
 
-    rows = PUD_MAX_BAND_PIXELS / (rect->x2 - rect->x1);
+    rows = pud->max_band_pixels / (rect->x2 - rect->x1);
     if (rows < 1)
         rows = 1;
 
