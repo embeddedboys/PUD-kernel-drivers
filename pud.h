@@ -62,7 +62,7 @@ struct pud_caps {
     u32 magic;
     u32 proto_ver;
     u32 frame_max;      /* max bytes the device accepts in one EP1 transfer */
-    u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI */
+    u32 decoder_type;   /* 0 unused, 1 JPEGDEC, 2 LZ4, 3 QOI */
 };
 
 #define PUD_DEFAULT_TIMEOUT USB_CTRL_SET_TIMEOUT
