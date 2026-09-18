@@ -65,9 +65,9 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 	switch (fb->format->format) {
 	case DRM_FORMAT_RGB565:
 		/* Already in the panel's native format: copy the block straight
-         * across. Compositors (and the 16bpp fbdev emulation) hand us RGB565
-         * buffers, so this path must not error out.
-         */
+		 * across. Compositors (and the 16bpp fbdev emulation) hand us RGB565
+		 * buffers, so this path must not error out.
+		 */
 		drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
 		break;
 	// case DRM_FORMAT_RGB888:
@@ -185,8 +185,8 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 		                encoded);
 		if (ret < 0) {
 			/* The frame did not reach the display: those pixels would stay
-             * stale until the application happens to redraw them. Ask for a
-             * full repaint on the next update instead. */
+			 * stale until the application happens to redraw them. Ask for a
+			 * full repaint on the next update instead. */
 			drm_dbg(fb->dev, "flush failed: %d\n", ret);
 			pud->needs_full_refresh = true;
 			return;
@@ -220,7 +220,7 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 	    pud->needs_full_refresh) {
 		if (pud->needs_full_refresh) {
 			/* A previous flush was lost; repaint everything so no stale
-             * pixels survive. */
+			 * pixels survive. */
 			pud->needs_full_refresh = false;
 			drm_rect_init(&rect, 0, 0, fb->width, fb->height);
 		}
@@ -392,14 +392,14 @@ static int pud_drm_dev_init_with_formats(
 		return -ENOMEM;
 
 	/* The encoder output buffer is DMA-allocated so its pages are within the
-     * USB controller's DMA range: the bulk SG transfer can map them directly
-     * (no swiotlb bounce). dma_alloc_coherent() returns a vmap address for
-     * the CPU encoder to write to; the underlying pages are obtained with
-     * vmalloc_to_page() for the SG list.
-     *
-     * It must hold the worst-case QOI stream for a full frame
-     * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
-     */
+	 * USB controller's DMA range: the bulk SG transfer can map them directly
+	 * (no swiotlb bounce). dma_alloc_coherent() returns a vmap address for
+	 * the CPU encoder to write to; the underlying pages are obtained with
+	 * vmalloc_to_page() for the SG list.
+	 *
+	 * It must hold the worst-case QOI stream for a full frame
+	 * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
+	 */
 	enc_size = rgb565_qoi_max_compressed_size((size_t)mode->hdisplay *
 	                                          mode->vdisplay);
 	if (!enc_size)
@@ -443,16 +443,16 @@ static int pud_drm_dev_init_with_formats(
 	}
 
 	/*
-     * Declare the output's physical size, because that is how a compositor
-     * decides which output an absolute input device belongs to: Mutter compares
-     * the device's size against the output's and wants them within 5% (an
-     * output that reports 0 mm never matches, and the touchscreen then falls
-     * back to spanning the whole screen).
-     *
-     * The device's size is derived from its axis resolution, which is an
-     * integer, so the value worth reporting is exactly xres/res millimeters --
-     * not the nominal panel size, which rounding would push past the 5%.
-     */
+	 * Declare the output's physical size, because that is how a compositor
+	 * decides which output an absolute input device belongs to: Mutter compares
+	 * the device's size against the output's and wants them within 5% (an
+	 * output that reports 0 mm never matches, and the touchscreen then falls
+	 * back to spanning the whole screen).
+	 *
+	 * The device's size is derived from its axis resolution, which is an
+	 * integer, so the value worth reporting is exactly xres/res millimeters --
+	 * not the nominal panel size, which rounding would push past the 5%.
+	 */
 	if (pud->display->width_mm && pud->display->height_mm) {
 		unsigned int rx, ry;
 
@@ -472,7 +472,7 @@ static int pud_drm_dev_init_with_formats(
 	}
 
 	/* Give the output an identity, so a compositor can tell which output the
-     * touchscreen belongs to (see pud_edid_build()). */
+	 * touchscreen belongs to (see pud_edid_build()). */
 	pud_edid_build(pud->display->width_mm ?: 74,
 	               pud->display->height_mm ?: 49);
 	rc = drm_connector_update_edid_property(&pud->connector,
@@ -549,7 +549,7 @@ struct drm_device *pud_drm_alloc(struct device *dev,
 	drm = &pud->drm;
 
 	/* Panel parameters before anything is sized from them: the mode below and,
-     * inside pud_drm_dev_init(), the encoder buffer and the plane limits. */
+	 * inside pud_drm_dev_init(), the encoder buffer and the plane limits. */
 	pud->display = &pud->display_data;
 	pud->display_data = pud_default_display;
 	if (caps_len >= (int)sizeof(*caps))
@@ -557,10 +557,10 @@ struct drm_device *pud_drm_alloc(struct device *dev,
 	pud_mode_init(&mode, &pud->display_data);
 
 	/* The streaming dma_mask is 64-bit so dma-buf buffers imported from the
-     * compositor (often above 4GB) map directly without swiotlb bounce, while
-     * the coherent mask stays 32-bit so our own encoder buffer (sent over the
-     * USB bulk endpoint) stays in a DMA range any USB controller can reach.
-     */
+	 * compositor (often above 4GB) map directly without swiotlb bounce, while
+	 * the coherent mask stays 32-bit so our own encoder buffer (sent over the
+	 * USB bulk endpoint) stays in a DMA range any USB controller can reach.
+	 */
 	pud->dma_mask = DMA_BIT_MASK(64);
 	dev->dma_mask = &pud->dma_mask;
 	dev->coherent_dma_mask = DMA_BIT_MASK(32);

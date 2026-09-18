@@ -90,8 +90,8 @@ struct pud_caps {
 	u32 decoder_type; /* PUD_DECODER_* */
 
 	/* Panel parameters, appended after 2.0.  A firmware that predates them
-     * answers with the first PUD_CAPS_V1_SIZE bytes only, so the host has to
-     * check the length instead of assuming this whole struct arrived. */
+	 * answers with the first PUD_CAPS_V1_SIZE bytes only, so the host has to
+	 * check the length instead of assuming this whole struct arrived. */
 	u16 xres; /* panel size in the frame it is driven in */
 	u16 yres;
 	u16 pixelclock_khz; /* bus clock the panel is driven with */
@@ -159,8 +159,8 @@ struct pud_display {
 	u32 rotate;
 	u32 pixelclock_khz;
 	/* Active area in mm: the input device hands libinput an axis resolution in
-     * units/mm so that it does not consider the device a buggy absolute one,
-     * and Mutter uses the device size to pick the output it belongs to. */
+	 * units/mm so that it does not consider the device a buggy absolute one,
+	 * and Mutter uses the device size to pick the output it belongs to. */
 	u32 width_mm;
 	u32 height_mm;
 };
@@ -175,31 +175,31 @@ struct pud {
 	struct usb_interface *intf;
 	bool disconnected;
 	/* Loaded with input_only=1: only the touch input device is registered, so
-     * no DRM/fbdev node can be held open and rmmod keeps working. */
+	 * no DRM/fbdev node can be held open and rmmod keeps working. */
 	bool input_only;
 	/* The device reports whether a touch controller is behind EP4 at all; when
-     * it is not, no input device is registered. */
+	 * it is not, no input device is registered. */
 	bool has_touch;
 
 	/* Device limits, from PUD_CMD_GET_CAPS at probe.  frame_max is the largest
-     * single EP1 transfer the device accepts and max_band_pixels the matching
-     * band budget used by pud_fb_dirty(); both fall back to the host-side
-     * defaults when the device does not report anything. */
+	 * single EP1 transfer the device accepts and max_band_pixels the matching
+	 * band budget used by pud_fb_dirty(); both fall back to the host-side
+	 * defaults when the device does not report anything. */
 	u32 frame_max;
 	u32 max_band_pixels;
 	u32 decoder_type;
 	u32 touch_polling_period; /* ms, as reported by the device */
 
 	/* Framebuffer specific data.  The display parameters come from the device
-     * (PUD_CMD_GET_CAPS), so they live per device instead of in a shared
-     * compile-time struct. */
+	 * (PUD_CMD_GET_CAPS), so they live per device instead of in a shared
+	 * compile-time struct. */
 	struct pud_display display_data;
 	struct fb_info *info;
 	struct pud_display *display;
 
 	/* Encoder data.  encoder_buf always starts with PUD_EP1_HEADER_SIZE bytes
-     * of header; the encoded payload goes right behind it, and one bulk
-     * transfer carries both. */
+	 * of header; the encoded payload goes right behind it, and one bulk
+	 * transfer carries both. */
 	u8 *encoder_buf;
 	dma_addr_t encoder_dma;
 	size_t encoder_buf_size;
@@ -210,7 +210,7 @@ struct pud {
 	struct sg_table bulk_sgt;
 	u32 pixel_format;
 	/* Set when a flush fails: that damage rectangle is lost, so the next
-     * update repaints the whole screen to clear any stale region. */
+	 * update repaints the whole screen to clear any stale region. */
 	bool needs_full_refresh;
 	struct drm_device drm;
 	struct drm_simple_display_pipe pipe;
@@ -218,7 +218,7 @@ struct pud {
 	struct drm_display_mode mode;
 
 	/* Input device and related.  One interrupt URB stays pending for the
-     * lifetime of the device; the completion handler re-submits it. */
+	 * lifetime of the device; the completion handler re-submits it. */
 	struct input_dev *indev;
 	struct urb *input_urb;
 	unsigned char *ep_int_buf;

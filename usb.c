@@ -80,8 +80,8 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 		data_size = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
 
 	/* The header lives in the DMA-coherent buffer the SG table already covers,
-     * right in front of the payload, so one bulk transfer carries both and the
-     * rectangle no longer needs a control request. */
+	 * right in front of the payload, so one bulk transfer carries both and the
+	 * rectangle no longer needs a control request. */
 	hdr->xs = x;
 	hdr->ys = y;
 	hdr->xe = xe;
@@ -116,12 +116,12 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 	destroy_timer_on_stack(&ctx.timer);
 
 	/*
-     * A bulk endpoint that stalled stays halted until the host clears it: the
-     * device stalls EP1 on purpose when a host declares more than it can take,
-     * and without this the display never comes back (measured: one oversized
-     * transfer, then "the screen is frozen" while the device itself is idle and
-     * fault-free). Clearing it lets the next damage rectangle go through.
-     */
+	 * A bulk endpoint that stalled stays halted until the host clears it: the
+	 * device stalls EP1 on purpose when a host declares more than it can take,
+	 * and without this the display never comes back (measured: one oversized
+	 * transfer, then "the screen is frozen" while the device itself is idle and
+	 * fault-free). Clearing it lets the next damage rectangle go through.
+	 */
 	if (rc < 0 && rc != -ETIMEDOUT) {
 		dev_warn_once(pud->dev,
 		              "EP1 transfer failed (%d), clearing the halt\n",
@@ -207,8 +207,8 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
 	bool have_params = caps_len >= (int)sizeof(*caps);
 
 	/* Defaults first: the firmware ships QOI, an unset decoder_type (0) would
-     * otherwise read as tjpgd, and a device that stays silent is assumed to
-     * have a panel until it says otherwise. */
+	 * otherwise read as tjpgd, and a device that stays silent is assumed to
+	 * have a panel until it says otherwise. */
 	pud->frame_max = USB_TRANS_MAX_SIZE;
 	pud->max_band_pixels = PUD_DEFAULT_BAND_PIXELS;
 	pud->decoder_type = PUD_DECODER_QOI;
@@ -237,7 +237,7 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
 	pud->decoder_type = caps->decoder_type;
 
 	/* Touch is optional: the firmware says whether it has a controller behind
-     * EP4 (most board configs do not). */
+	 * EP4 (most board configs do not). */
 	if (have_params)
 		pud->has_touch = !!(caps->flags & PUD_CAPS_TOUCH);
 
@@ -294,7 +294,7 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	printk("\n\n%s\n", __func__);
 
 	/* the framebuffer memory size comes from the panel parameters, so they
-     * have to be known before it is allocated */
+	 * have to be known before it is allocated */
 	if (caps_len >= (int)sizeof(*caps))
 		pud_caps_to_display(&display, caps);
 
@@ -361,7 +361,7 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 	printk("\n\n%s\n", __func__);
 
 	/* the DRM mode is built from the panel parameters, so pud_drm_alloc()
-     * takes the capability report */
+	 * takes the capability report */
 	drm = pud_drm_alloc(dev, caps, caps_len);
 	if (IS_ERR(drm))
 		return PTR_ERR(drm);
@@ -423,7 +423,7 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	}
 
 	/* Ask the device for its parameters before anything is registered: the DRM
-     * mode and the input device's axis ranges are built from them. */
+	 * mode and the input device's axis ranges are built from them. */
 	caps_len = pud_query_caps(udev, caps);
 	if (caps_len < 0) {
 		dev_warn(&intf->dev,
@@ -465,13 +465,13 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 #if PUD_ENABLE_INPUT_SUPPORT
 	/* Both branches publish the device on the interface (the display backends
-     * do it while they set up), and the capability flags that decide whether
-     * there is a touch controller live in it. */
+	 * do it while they set up), and the capability flags that decide whether
+	 * there is a touch controller live in it. */
 	pud = usb_get_intfdata(intf);
 
 	/* Input is a bonus, and optional on the device side: a firmware built
-     * without a touch driver (most board configs) says so in the capability
-     * flags and gets no input device here. */
+	 * without a touch driver (most board configs) says so in the capability
+	 * flags and gets no input device here. */
 	if (pud->has_touch) {
 		rc = pud_input_setup(intf, id);
 		if (rc)
@@ -510,8 +510,10 @@ static void pud_disconnect(struct usb_interface *intf)
 #endif
 }
 
-static struct usb_device_id pud_ids[] = { { USB_DEVICE(0x2E8A, 0x0001) },
-	                                  { /* KEEP THIS */ } };
+static struct usb_device_id pud_ids[] = {
+	{ USB_DEVICE(0x2E8A, 0x0001) },
+	{ /* KEEP THIS */ },
+};
 MODULE_DEVICE_TABLE(usb, pud_ids);
 
 static struct usb_driver pud_drv = {
@@ -523,5 +525,5 @@ static struct usb_driver pud_drv = {
 module_usb_driver(pud_drv);
 
 MODULE_AUTHOR("Wooden Chair <hua.zheng@embeddedboys.com>");
-MODULE_DESCRIPTION("Pico USB display DRM driver");
+MODULE_DESCRIPTION("DRM driver for Pico USB display");
 MODULE_LICENSE("GPL");

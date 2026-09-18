@@ -108,9 +108,15 @@
 
 ## 代码约定
 
-- C 风格用**内核风格：tab + 8 宽缩进**（仓库根的 `.clang-format` 是从内核原样拿的 ✓），
-  `u8/u16/u32` 是内核类型别名。代码已整体按它格式化过；**vendored 的
-  `rgb565_qoi.*` / `rgb565_rle.*` / `jpegenc.*` 不要格式化**（要与上游逐字节一致）。
+- C 风格用**内核风格：tab + 8 宽缩进**（仓库根的 `.clang-format` 取自内核，唯一偏离是
+  `UseTab: ForIndentation`，理由写在文件里），`u8/u16/u32` 是内核类型别名。代码已整体按它
+  格式化过；**vendored 的 `rgb565_qoi.*` / `rgb565_rle.*` / `jpegenc.*` 不要格式化**
+  （要与上游逐字节一致）。
+- **注释体不会被 clang-format 修**：`ReflowComments: false` 下 `/*` 之后的续行缩进原样保留，
+  格式化对错误缩进是 no-op（`clang-format` 跑前跑后一样）。所以注释续行必须**手写**成
+  "每层一个 tab + 一个空格"：`\t * 文本`、`\t */`。这几份源码原本每层 4 空格，
+  reformat 只把代码换成 tab、注释留在 tab=4 的对齐上 —— 在 tab=8 的内核风格里看着就是歪的，
+  已修过一轮。
 - 新增源文件要加进 `Makefile` 的对象列表（写法是
   `$(MODULE_NAME)-y += ...`，其中 `MODULE_NAME:=pud`）。
 - 收尾自查：`make modules` 没有新增 warning，`dmesg` 里没有 WARN/oops。
