@@ -41,12 +41,14 @@
   "editor.detectIndentation": false,
   "editor.rulers": [80],
   "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
     "editor.tabSize": 8,
     "editor.indentSize": "tabSize",
     "editor.insertSpaces": false,
     "editor.detectIndentation": false
   },
   "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
     "editor.tabSize": 8,
     "editor.indentSize": "tabSize",
     "editor.insertSpaces": false,
@@ -70,9 +72,10 @@
     "tests/rect": true
   },
 
-  // The tree is kernel-formatted now, so saving may reformat; trailing
-  // whitespace stays (kernel style does not strip it).
-  "editor.formatOnSave": false,
+  // The tree is kernel-formatted, so saving reformats with clang-format (which
+  // reads the kernel .clang-format next to it); trailing whitespace stays,
+  // because kernel style does not strip it.
+  "editor.formatOnSave": true,
   "files.trimTrailingWhitespace": false,
   "files.insertFinalNewline": true
 }
