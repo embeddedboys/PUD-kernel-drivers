@@ -38,4 +38,4 @@ test: all
 	sudo insmod $(MODULE_NAME).ko || true
 
 obj-m += $(MODULE_NAME).o
-$(MODULE_NAME)-y += usb.o jpegenc.o encoder.o rgb565_qoi.o fb.o drm.o input.o
+$(MODULE_NAME)-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o

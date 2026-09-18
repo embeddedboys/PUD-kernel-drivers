@@ -125,3 +125,22 @@ int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
     *out_size = sz;
     return 0;
 }
+
+/* Same worst case as QOI (3 bytes per pixel plus framing), so the band budget
+ * the device reports covers both. */
+int rle_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
+                      uint8_t *work_buf, size_t *out_size)
+{
+    size_t sz;
+
+    if (!rgb565 || !work_buf || !w || !h || !out_size)
+        return -EINVAL;
+
+    sz = rgb565_rle_compress((const uint16_t *)rgb565, (size_t)w * h,
+                             work_buf, work_size);
+    if (sz == 0)
+        return -ENOSPC;
+
+    *out_size = sz;
+    return 0;
+}

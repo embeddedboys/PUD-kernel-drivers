@@ -94,22 +94,41 @@ static int pud_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer
 /*
  * Frame encoding / refresh policy.
  *
- * Frames are encoded with RGB565 QOI (lossless, very fast to encode and
- * decode) instead of JPEG. The firmware's QOI decoder handles arbitrary
- * partial windows correctly (it decodes pixel by pixel, unlike the JPEGDEC
- * path whose MCU/crop logic mis-clips a sub-image decoded at x != 0 and could
- * wedge the display under load). So the damage rectangle is sent as-is:
- * small, lossless and fast.
+ * Frames are encoded with RGB565 QOI or RGB565 RLE -- whichever the device
+ * reports it decodes (PUD_CMD_GET_CAPS -> decoder_type), because pushing QOI at
+ * an RLE firmware (or the other way around) only produces dropped frames.  Both
+ * are lossless and fast to encode, and the firmware decodes arbitrary partial
+ * windows correctly (unlike the JPEGDEC path whose MCU/crop logic mis-clips a
+ * sub-image decoded at x != 0 and could wedge the display under load).  So the
+ * damage rectangle is sent as-is: small, lossless and fast.
  *
- * A rectangle whose QOI stream might not fit the USB transfer limit is split
- * into horizontal bands and each band is encoded and flushed on its own. The
- * QOI worst case is 3 bytes per pixel, so a band of at most
+ * A rectangle whose stream might not fit the USB transfer limit is split into
+ * horizontal bands and each band is encoded and flushed on its own. Both
+ * codecs' worst case is 3 bytes per pixel, so a band of at most
  * pud->max_band_pixels pixels always fits.  That budget comes from the device
  * (PUD_CMD_GET_CAPS, see pud_read_caps()) because it depends on how much RAM
  * the firmware has: an RP2040 accepts half-size transfers, an RP2350 the full
  * 64 KB.  It falls back to PUD_DEFAULT_BAND_PIXELS when the device does not
  * report anything.
  */
+static int pud_encode_band(struct pud *pud, unsigned int width,
+                           unsigned int height, size_t *out_size)
+{
+    u8 *out = pud->encoder_buf + PUD_EP1_HEADER_SIZE;
+    size_t capacity = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
+
+    switch (pud->decoder_type) {
+    case PUD_DECODER_QOI:
+        return qoi_encode_rgb565((u8 *)pud->tx_buf, width, height, capacity,
+                                 out, out_size);
+    case PUD_DECODER_RLE:
+        return rle_encode_rgb565((u8 *)pud->tx_buf, width, height, capacity,
+                                 out, out_size);
+    default:
+        return -EOPNOTSUPP;
+    }
+}
+
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
                          struct drm_rect *rect)
 {
@@ -117,7 +136,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
     struct drm_rect band;
     unsigned int rows, y;
     bool swap = false;
-    ssize_t qoi_length;
+    size_t encoded;
     int ret;
 
     if (rect->x2 <= rect->x1 || rect->y2 <= rect->y1)
@@ -142,18 +161,21 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
         if (ret)
             return;
 
-        qoi_length = 0;
-        ret = qoi_encode_rgb565((uint8_t *)pud->tx_buf, width, height,
-                                pud->encoder_buf_size, pud->encoder_buf,
-                                &qoi_length);
+        encoded = 0;
+        ret = pud_encode_band(pud, width, height, &encoded);
         if (ret) {
-            drm_err_once(fb->dev, "QOI encode failed: %d\n", ret);
+            if (ret == -EOPNOTSUPP)
+                drm_err_once(fb->dev,
+                             "device decodes decoder_type %u, which this driver cannot encode\n",
+                             pud->decoder_type);
+            else
+                drm_err_once(fb->dev, "band encode failed: %d\n", ret);
             pud->needs_full_refresh = true;
             return;
         }
 
         ret = pud_flush(pud, band.x1, band.y1, band.x2 - 1, band.y2 - 1,
-                        pud->encoder_buf, qoi_length);
+                        pud->encoder_buf + PUD_EP1_HEADER_SIZE, encoded);
         if (ret < 0) {
             /* The frame did not reach the display: those pixels would stay
              * stale until the application happens to redraw them. Ask for a
