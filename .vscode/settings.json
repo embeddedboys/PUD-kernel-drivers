@@ -31,6 +31,28 @@
   "clangd.onConfigChanged": "restart",
   "clangd.detectExtensionConflicts": true,
 
+  // Kernel style is tabs, eight columns wide (.clang-format). That is an editor
+  // setting, not something clang-format can impose: without this VS Code keeps
+  // its own default of 4 and "detectIndentation" re-guesses per file. Spelled
+  // out for C as well, so a language-specific user setting cannot win.
+  "editor.tabSize": 8,
+  "editor.indentSize": "tabSize",
+  "editor.insertSpaces": false,
+  "editor.detectIndentation": false,
+  "editor.rulers": [80],
+  "[c]": {
+    "editor.tabSize": 8,
+    "editor.indentSize": "tabSize",
+    "editor.insertSpaces": false,
+    "editor.detectIndentation": false
+  },
+  "[cpp]": {
+    "editor.tabSize": 8,
+    "editor.indentSize": "tabSize",
+    "editor.insertSpaces": false,
+    "editor.detectIndentation": false
+  },
+
   // Build output is noise in the explorer and the pickers.
   "files.exclude": {
     "**/*.o": true,
@@ -48,8 +70,8 @@
     "tests/rect": true
   },
 
-  // This tree is 4-space kernel style, and there is no .clang-format to point a
-  // formatter at, so saving must not reformat anything.
+  // The tree is kernel-formatted now, so saving may reformat; trailing
+  // whitespace stays (kernel style does not strip it).
   "editor.formatOnSave": false,
   "files.trimTrailingWhitespace": false,
   "files.insertFinalNewline": true
