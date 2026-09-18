@@ -45,13 +45,19 @@ make modules \
 pud: disagrees about version of symbol module_layout
 ```
 
-步骤：
+**在板子上直接编**（版本天然一致，`KERN_DIR` 默认就对）：
+
+```bash
+make modules            # = /lib/modules/$(uname -r)/build
+```
+
+**在 x86-64 开发机上交叉编**（板子在跑别的事情时更方便）：
 
 ```bash
 # 1) 从板子取 headers（板子上有 /usr/src/linux-headers-$(uname -r)）
 tar czf hdrs-$(uname -r).tgz -C /usr/src linux-headers-$(uname -r)
 
-# 2) 在 x86-64 开发机上解出（见下面的"为什么不能直接在板子上编"）
+# 2) 在 x86-64 开发机上解出
 #    目录形如 .pud-test/linux-headers-6.1.172/{Makefile,Module.symvers,arch,include,scripts}
 
 # 3) 用该 headers 树编模块
@@ -66,18 +72,36 @@ modinfo pud.ko | grep vermagic
 # vermagic:  6.1.172 SMP mod_unload modversions aarch64
 ```
 
-### ⚠️ 为什么不能直接在板子上编：headers 里的 host 工具是 x86-64
+### headers 里的 host 工具是 x86-64（板子上本地编的坑，Makefile 已处理）
 
-板子 `/usr/src/linux-headers-6.1.172/scripts/basic/fixdep` 的实际类型是：
+板子 `/usr/src/linux-headers-6.1.172/scripts/basic/fixdep` 是 **x86-64** 的
+（厂商在 x86-64 主机上交叉编译出 arm64 内核，`fixdep`/`modpost` 这类 host 工具跟着
+编成了 x86-64；拷到 WSL 后 BuildID 与板子上的完全一致，所以交叉编能直接跑）。
+在 arm64 板子上执行就是：
 
 ```
-ELF 64-bit LSB pie executable, x86-64 ... for GNU/Linux 3.2.0
+/bin/sh: 1: scripts/basic/fixdep: Exec format error
 ```
 
-因为厂商是**在 x86-64 主机上交叉编译**出 arm64 内核的，`fixdep`/`modpost` 这类
-**host 工具**自然编成了 x86-64。在 arm64 板子上执行会直接 `Exec format error`。
-所以正确做法是：**把 headers 拷到 x86-64 主机上，用交叉编译器编**。
-（拷贝到 WSL 后 `fixdep` 的 BuildID 与板子上的完全一致，可直接运行。）
+这个坑没法让 kbuild 自己修：目录是 root 只读的；headers 包里没有任何 Kconfig，而
+`include/config/auto.conf.cmd` 把一大串不存在的 Kconfig 列成依赖，所以
+`make scripts_basic` / `make modules_prepare` 会先去跑 `syncconfig` 然后失败；
+把 `fixdep` 删掉也不会被重建 —— 外模块路径（`make M=... modules`）根本不构建 host 工具，
+只会得到 `scripts/basic/fixdep: not found`。
+
+所以 `Makefile` 在**检测到 host 工具不是本机架构**（读 ELF 头 offset 18 的
+`e_machine`，只用 `od`）时会：
+
+1. 把 headers 树拷到 `~/.cache/pud-kbuild/<kernel release>`，按版本缓存。
+   拷贝必须用 `realpath` 解析后的路径：`/lib/modules/$(uname -r)/build` 是符号链接，
+   `cp -a` 会把链接本身拷过去，编译就写进只读的原目录（`Permission denied`）；
+2. 在副本里按 kbuild 自己记在 `.cmd` 里的命令，用**本机 gcc** 重建
+   `fixdep`/`modpost`（含 `mk_elfconfig`、`elfconfig.h`），flags 保持内核原样；
+3. 之后的构建全部用这个副本，**`KERN_DIR` 始终只读**（铁律 2）。
+
+实测：板子上从零 `make` 到 `pud.ko` 全绿，`vermagic` 正确；副本 65 MB，删掉
+`~/.cache/pud-kbuild/<release>` 即重做。x86 上交叉编不受影响（host 工具本来就能跑，
+不会走副本路径）。
 
 ## 真机验证流程
 
@@ -90,13 +114,36 @@ ELF 64-bit LSB pie executable, x86-64 ... for GNU/Linux 3.2.0
 
 ### 部署 + 加载
 
+`scripts/pud-load.sh` 在**板子上**跑（`insmod`/`rmmod` 只存在于那边），加载、卸载、
+查看状态一个工具包完：
+
 ```bash
-scp pud.ko <board>:~/pud-test/pud.ko
-# 板子上：校验 md5 → insmod → 打印 dmesg
-ssh <board> '~/pud-test/loadN.sh'
+scp pud.ko <board>:~/pud/                     # 或者直接在板子上 make modules
+ssh <board>
+  scripts/pud-load.sh load                     # 显示 + 触摸
+  scripts/pud-load.sh load input_only=1        # 只触摸（rmmod 随时能卸，调触摸首选）
+  scripts/pud-load.sh load input_only=1 report_mode=pointer
+  scripts/pud-load.sh status                   # 参数 / 显示节点 / 输入设备 / dmesg
+  scripts/pud-load.sh unload                   # 被桌面占住时会告诉你重新用 --stop-gdm
+  scripts/pud-load.sh unload --stop-gdm        # 停 gdm → rmmod → 起 gdm
+  scripts/pud-load.sh reload input_only=1      # 换参数/换 .ko 时用
 ```
 
-用 md5 校验是刻意的：曾经因为传了旧文件而白折腾一整轮。
+它替你做掉两件以前靠人记的事：
+
+1. **vermagic 校验**：`modinfo -F vermagic` 必须等于 `uname -r`，否则直接拒绝加载并说明
+   原因 —— 这代替了以前"人工对 md5"，而且能同时抓住"传了旧 `.ko`"和"编错了内核"两类事故（
+   实测：`vermagic 6.1.172 (running kernel: 6.1.172)` 通过，不匹配时给出修复提示）。
+   顺手把 md5 也打出来，便于和 `scp` 的来源对账。
+2. **卸载被占用的处置**：先 `lsof /dev/dri/*` 列出占用者，再提示
+   `--stop-gdm`；带该参数时按"停 gdm → rmmod → 起 gdm"走一遍，即使 rmmod 失败也会把会话
+   拉回来（`rmmod ok (gdm restarted)` / gdm 之后仍是 `active`，实测）。
+
+`PUD_KO=/path/to/pud.ko` 可以指定别的模块（默认为仓库根的 `./pud.ko`），
+`MODULE=` 可以换模块名。工具只依赖 `kmod`/`lsof`/`systemctl`，不带任何本机路径。
+
+> 老工作区里那些 `loadN.sh` 把路径和 md5 写死了，换一块板子或换一次构建就要改；
+> 现在统一用这个工具。
 
 ### 期望的 dmesg
 
@@ -141,6 +188,21 @@ ERROR: Module pud is in use
 次选手段（不一定管用）：
 - `systemctl stop gdm` 之类停掉会话，再 `rmmod`
 - 解绑 vtconsole：`echo 0 > /sys/class/vtconsole/vtcon1/bind`
+
+### 只调触摸：`input_only=1`
+
+反复试触摸时别把显示那半边也加载进来：
+
+```bash
+sudo insmod pud.ko input_only=1         # 只注册 input 设备，没有 DRM/fbdev 节点
+grep -A5 pud /proc/bus/input/devices    # 找 eventN
+sudo timeout 10 cat /dev/input/eventN | od -An -tx2   # 按屏幕就会出字节
+sudo rmmod pud                          # 立刻能卸
+```
+
+没有 DRM 节点 → gnome-shell/logind 占不住模块 → 不用停 gdm、不用重启板子，
+改一次 `input.c` 就能马上重编重载。默认（`input_only=0`）仍是显示 + 触摸一起注册，
+那时 `rmmod` 还是会被桌面会话挡住。
 
 ### fbdev 编号不固定
 

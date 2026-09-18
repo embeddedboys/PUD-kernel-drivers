@@ -36,8 +36,14 @@
 | 板子运行内核的 headers | `make -C <headers> M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules` |
 
 - `vermagic` 必须与板子 `uname -r` 一致，否则 `disagrees about version of symbol module_layout`。
-- **板子上的 kernel headers 里 host 工具是 x86-64**（厂商在 x86 上交叉编译出 arm64 内核），
-  在 arm64 板子上直接编会 `Exec format error` —— 要在 x86 开发机上用交叉编译器编。
+- **在板子上本地编也能用**（`make modules`，KERN_DIR 默认就是 `/lib/modules/$(uname -r)/build`）。
+  厂商的 headers 包里 host 工具（`fixdep`/`modpost`）是 **x86-64** 的，在 arm64 板上会
+  `Exec format error`，而那个目录 root 只读、又缺 Kconfig，kbuild 自己重建不了；Makefile 检测到
+  这种不匹配会自动把 headers 复制到 `~/.cache/pud-kbuild/<release>` 并在副本里用本机 gcc 重编
+  这几个工具（命令取自 kbuild 自己的 `.cmd`），**KERN_DIR 始终只读**。副本按内核版本缓存，
+  删掉该目录即重做。
+- 在 x86 开发机上交叉编译同样可行（`KERN_DIR=<vendor-kernel-src> KERN_OBJ_DIR=<vendor-kernel-objtree>`
+  或板子 headers），此时 host 工具本来就能跑，不会走上面的副本路径。
 - 验证面：`modinfo pud.ko | grep vermagic`、`dmesg | grep -i pud`。
   细节见 [`notes/build-and-test.md`](notes/build-and-test.md)。
 
@@ -54,21 +60,45 @@
 2. **`pud_drm_alloc()` 失败返回 `ERR_PTR`，必须 `IS_ERR()` 判断**，不能用 `if (!drm)`。
 3. **一帧的压缩结果必须 ≤ 设备上报的单次传输上限**，靠 `pud_fb_dirty()` 的分带
    （`pud->max_band_pixels`）保证。这个上限**由设备通过 `PUD_CMD_GET_CAPS` 上报**
-   （真机日志 `caps: proto 1, frame_max 65536, decoder 3 -> 21839 pixels per band`），
-   拿不到时退回 `PUD_DEFAULT_BAND_PIXELS`（21839 px）。
+   （真机日志 `caps: proto 2, frame_max 65536, decoder 3 -> 21835 pixels per band`；
+   `USB_TRANS_MAX_SIZE` 是 65535，所以 `min()` 之后落到 21835），
+   拿不到时退回 `PUD_DEFAULT_BAND_PIXELS`（21835 px）。
    **不要把它改回写死的常量** —— RP2040 的固件只接受一半大小的传输。
+   同一个命令还上报**面板参数**（分辨率/旋转/bpp/总线时钟/触摸轮询周期），
+   DRM mode、`encoder_buf`、fbdev 显存、输入设备轴范围都由它推出来 ——
+   **不要在驱动里写死 480×320**（见 [`notes/architecture.md`](notes/architecture.md) 的"设备参数"）。
    改分带规则前先读 [`notes/display-and-refresh.md`](notes/display-and-refresh.md)。
 4. **flush 失败必须置 `needs_full_refresh`**，否则那块 damage 永久丢失 = 残影。
-5. **协议字段改动要成对改固件**（`REQ_*`、`struct req_ep1_out`、`struct req_ep2_in`），
+5. **协议字段改动要成对改固件**（`REQ_*`、`struct pud_ep1_header`、`struct req_ep2_in`），
    并同步两个仓库的 `notes/usb-protocol.md`。
+6. **EP4 触摸只保持一条常驻 URB，而且触摸在设备侧是可选的。**
+   `PUD_CAPS_TOUCH`（capability flags 的 bit0）没置位时**不要注册输入设备** ——
+   `pico-display-lib` 里多数板级配置是 `INDEV_DRV_NOT_USED=1`，那种固件 EP4 永远不发帧，
+   老驱动会给用户一个"存在但永远不动"的输入设备。设备主动推送：`pud_input_setup()`
+   提交一次，完成回调里**除 `-ENOENT`/`-ECONNRESET`/`-ESHUTDOWN`（正在卸载 / 总线没了）
+   外，无论什么 status 都要重新提交**；旧版 `if (urb->status) return;` 遇到一次抖动就
+   永久不再提交，输入就此失灵。回调在中断上下文，重提交用 `GFP_ATOMIC`。
+   **不要再为每个样本发 `REQ_EP4_IN` 控制请求**（那是旧协议的做法）。
+   注册成什么设备由 `report_mode` 决定（`touch` 默认 / `pointer`，见
+   [`notes/architecture.md`](notes/architecture.md) 的"输入设备"一节）：
+   **绝对设备必须给分辨率**（`input_abs_set_res()`，用设备上报的 `width_mm/height_mm`），
+   否则 libinput 直接判定为驱动 bug。清理顺序：`usb_kill_urb()`（等回调结束）→
+   `usb_free_urb()` → `kfree(ep_int_buf)`；`pud->indev` 来自
+   `devm_input_allocate_device()`，**不要**再手动 `input_unregister_device()`（会重复注销）。
 
 ## 真机测试
 
-- 部署：`scp pud.ko` 到板子 → 跑 `loadN.sh`。**加载脚本要先校验 md5**，
-  曾因传了旧 `.ko` 白折腾一整轮。
-- `rmmod` 常失败（`Module is in use`）：`lsof /dev/dri/*` 会看到 **logind + gnome-shell**
-  持有 `/dev/dri/card*`。**实测有效**的做法是先 `systemctl stop gdm`，`rmmod` 成功后再
-  `systemctl start gdm`（不用重启板子）；重启仍是最后的兜底。
+- 部署与加载用仓里的 [`scripts/pud-load.sh`](scripts/pud-load.sh)（在**板子上**跑）：
+  `load [模块参数...]` / `unload [--stop-gdm]` / `reload` / `status`。它会先校验
+  `vermagic` 与 `uname -r` 一致（曾因旧 `.ko` 白折腾一整轮），并在卸载被桌面占住时
+  列出占用者、`--stop-gdm` 时按"停 gdm → rmmod → 起 gdm"走一遍。
+- **只调触摸就别加载显示**：`scripts/pud-load.sh load input_only=1` 只注册 input 设备，
+  没有 DRM/fbdev 节点，桌面会话占不住模块，`unload` 立刻成功 —— 反复试触摸不用停 gdm
+  （带显示加载时才需要 `unload --stop-gdm`）。看事件：
+  `grep -A5 pud /proc/bus/input/devices` 找 event 号，再
+  `sudo timeout 10 cat /dev/input/eventN | od -An -tx2`，按屏幕会看到
+  `0003 0000 xxxx`（ABS_X）/ `0003 0001 yyyy`（ABS_Y）/ `0001 014a 0001`（BTN_TOUCH）。
+  默认（不带参数）还是显示 + 触摸一起注册。
 - **fbdev 编号不固定**：PUD 可能是 `fb0` 也可能是 `fb1`。用
   `cat /sys/class/graphics/fb*/name` 找 `pud-drmdrmfb`，不要写死。
 - 要看固件内部状态（解码计数等）走 CMSIS-DAP：OpenOCD 跑在 **Windows 宿主机**，

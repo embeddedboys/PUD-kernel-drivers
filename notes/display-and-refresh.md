@@ -61,7 +61,7 @@ drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
 并且 framebuffer 用 `drm_gem_fb_create_with_dirty` 创建（`FB_DIRTY` 语义），
 意思是"用户空间应当提供 damage"，与上面的 helper 配套。
 
-## 编码：RGB565 QOI
+## 编码：RGB565 QOI / RLE（跟着设备走）
 
 历史包袱：早期用 JPEG（`jpegenc.c`）。JPEGDEC 解码器的 MCU/crop 逻辑在
 `x != 0` 的子图上会错位裁切，局部刷新既不准也容易把显示卡死。改成 **QOI** 之后：
@@ -70,17 +70,25 @@ drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
 - **编码极快**：主机侧编码不成为瓶颈
 - **解码器按像素处理**：任意子矩形都正确，没有 MCU 对齐问题
 
-代价是压缩率不如 JPEG（照片类内容尤其明显），所以有下面的分带机制。
+**编码器由设备决定**：`PUD_CMD_GET_CAPS` 的 `decoder_type` 是几，就发什么
+（`PUD_DECODER_QOI` = 3 → `qoi_encode_rgb565()`，`PUD_DECODER_RLE` = 4 →
+`rle_encode_rgb565()`）。给 RLE 固件发 QOI 只会被解码器丢掉（magic 不对），
+反过来也一样，所以不要在主机侧写死一种。设备没报能力时按固件的默认值 QOI 走。
+目前**只实现了这两种**：LZ4（2）与 JPEG（0/1）在 DRM 局部刷新路径里会明确报错
+（`drm_err_once`）并置 `needs_full_refresh`，不会把垃圾推给设备。
+（RLE 分支只做了编译验证，固件当前是 `DECODER_TYPE=3`，**未上机验证**。）
+
+两种编码器的最坏情况都是 **3 字节/像素**，所以下面那套分带预算对两者都成立。
 
 ### 分带（band splitting）
 
-单次传输的 `size` 字段受 **设备实际上限**约束，而一帧的 QOI 最坏情况是
+单次传输的 `size` 字段受 **设备实际上限**约束，而一帧的最坏情况是
 **3 字节/像素**。所以按像素数切带：
 
 ```c
 /* pud->max_band_pixels 由 PUD_CMD_GET_CAPS 在 probe 时问设备得到：
- *   min(USB_TRANS_MAX_SIZE, caps.frame_max) - 16) / 3
- * 拿不到能力报告时退回 PUD_DEFAULT_BAND_PIXELS (= 21839)。 */
+ *   (min(USB_TRANS_MAX_SIZE, caps.frame_max) - PUD_EP1_HEADER_SIZE - 16) / 3
+ * 拿不到能力报告时退回 PUD_DEFAULT_BAND_PIXELS (= 21835)。 */
 
 rows = pud->max_band_pixels / (rect->x2 - rect->x1);          /* 每条带的行数 */
 if (rows < 1) rows = 1;
@@ -133,8 +141,11 @@ drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
 | 缓冲区 | 分配方式 | 大小 | 用途 |
 | --- | --- | --- | --- |
 | `pud->tx_buf` | `vmalloc` | `hdisplay * vdisplay * 2`（480×320 → 307200） | RGB565 转换目标（**只给 CPU 用**，不参与 DMA） |
-| `pud->encoder_buf` | `dma_alloc_coherent` | `rgb565_qoi_max_compressed_size(h*v)` = `8 + h*v*3 + 8`（480×320 → 460816） | QOI 编码输出 + DMA 源 |
+| `pud->encoder_buf` | `dma_alloc_coherent` | `rgb565_qoi_max_compressed_size(h*v)` = `8 + h*v*3 + 8`（480×320 → 460816） | QOI/RLE 编码输出 + DMA 源 |
 | `pud->bulk_sgt` | `sg_alloc_table_from_pages`（页来自 `vmalloc_to_page(encoder_buf)`） | 同上 | 批量传输的 SG 表 |
+
+`hdisplay`/`vdisplay` 来自 **DRM mode，而 mode 由设备上报的面板参数（`PUD_CMD_GET_CAPS`）
+在 probe 时生成**（`pud_mode_init()`），不再是编译期常量 —— 换面板不用改驱动。
 
 **为什么 encoder_buf 必须是 `dma_alloc_coherent` 而不是 `vmalloc`**：
 `tx_buf` 只在 CPU 侧读写，`vmalloc` 没问题；但 `encoder_buf` 要被 USB 控制器 DMA 读取，

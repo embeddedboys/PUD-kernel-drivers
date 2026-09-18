@@ -19,6 +19,26 @@ sudo insmod pud.ko
 ```
 The default display backend is DRM.
 
+## Load / unload
+
+On the machine the panel is plugged into (`insmod`/`rmmod` only exist there), use
+the helper instead of a hand-written script: it refuses to load a module built for
+a different kernel (the `vermagic` mismatch that used to cost a debugging round)
+and handles a desktop holding the DRM node when unloading.
+
+```bash
+scripts/pud-load.sh load                       # display + touch
+scripts/pud-load.sh load input_only=1          # touch only: rmmod always succeeds
+scripts/pud-load.sh load input_only=1 report_mode=pointer
+scripts/pud-load.sh status                     # parameters, nodes, input device, dmesg
+scripts/pud-load.sh unload [--stop-gdm]        # --stop-gdm: stop gdm, rmmod, start gdm
+scripts/pud-load.sh reload input_only=1        # new .ko or different options
+```
+
+`PUD_KO=/path/to/pud.ko` selects a different module (default: the repo's
+`./pud.ko`). See [notes/architecture.md](./notes/architecture.md) for what
+`input_only` and `report_mode` do.
+
 ## Setup and Test Desktop
 
 ### Install Desktop
@@ -65,6 +85,6 @@ Design notes and pitfall write-ups for maintainers live in [`notes/`](./notes/):
 
 - [Architecture and code map](./notes/architecture.md)
 - [USB protocol](./notes/usb-protocol.md) (authoritative field definitions)
-- [Display and refresh policy](./notes/display-and-refresh.md) (damage, QOI, band splitting)
+- [Display and refresh policy](./notes/display-and-refresh.md) (damage, QOI/RLE, band splitting)
 - [Build and test](./notes/build-and-test.md) (6.1.118 objtree / 6.1.172 headers)
 - [Pitfalls](./notes/pitfalls.md) (DMA buffers, `transfer buffer is on stack`, vmalloc, swiotlb)

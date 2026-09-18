@@ -20,7 +20,7 @@
 
 | 端点 | 方向/类型 | 用途 | 状态 |
 | --- | --- | --- | --- |
-| EP0 | control | 厂商请求（窗口协商、查询命令） | 使用中 |
+| EP0 | control | 厂商请求（查询命令；**窗口协商在 v2 已删除**） | 使用中 |
 | EP1 | OUT / bulk | **图像压缩流**（QOI 帧数据） | 使用中 |
 | EP2 | IN / bulk | 查询响应（如读序列号） | 使用中 |
 | EP3 | OUT / bulk | — | 固件已定义 `REQ_EP3_OUT`/`EP3_OUT_ADDR`，但**未写进配置描述符**，未实现 |
@@ -43,9 +43,20 @@
 - 坐标是**显示坐标系**下的面板坐标（0..479 / 0..319），设备已按 `TFT_ROTATION` 变换并
   钳位，驱动直接用（`ABS_X/ABS_Y` 的 480/320 范围就是它）。
 - 字节 0..4 与旧驱动解析的布局一致；version != 0 表示这版固件真的支持触摸。
-- `REQ_EP4_IN`(0x05) 仍可用：它返回**当前**这一帧（轮询式主机）。
+- `REQ_EP4_IN`(0x05) 仍可用：它返回**当前**这一帧（轮询式主机）。驱动**不用**它 —— 那是旧做法，
+  会把 33 ms 的推送节奏拖成每个样本一次控制传输。
 - 空闲时设备不发帧，所以 `usb_submit_urb()` 会一直挂着 —— 这是正常的，
   **不要在 URB 回调里因为 `-ETIMEDOUT`/`-EPROTO` 就停止重提交**。
+- **实测采样率**（2026-09，真机拖动）：固件 33 ms 轮询 + 33 ms `bInterval` 时相邻坐标点
+  间隔 32 ms；改成 10 ms + 8 ms 后中位 **8.0 ms（≈125 Hz）**（一次 7.5 s 拖动 563 个点）。
+  驱动不用改：`usb_fill_int_urb()` 用的是描述符里的 `bInterval`。
+- 驱动侧实现（`input.c`）：`pud_input_setup()` 只提交一次 URB，回调里除
+  `-ENOENT`/`-ECONNRESET`/`-ESHUTDOWN` 外都重新提交；`version != 1` 的报告不解析
+  （0 = 这版固件没有触摸），长度不足 8 字节的短报告只告警。上报用
+  `BTN_TOUCH`/`BTN_LEFT` + `ABS_X`/`ABS_Y`（单点，不走 MT slot），并置
+  `INPUT_PROP_DIRECT` 让上层知道这是触摸屏。
+- 只测触摸时用 `insmod pud.ko input_only=1`（不注册 DRM/fbdev，`rmmod` 随时能卸），
+  见 [architecture.md](architecture.md)。
 
 ## 请求号
 
@@ -53,8 +64,8 @@
 
 ```
 REQ_EP0_OUT = 0x00      REQ_EP0_IN  = 0x01
-REQ_EP1_OUT = 0x02      REQ_EP2_IN  = 0x03
-REQ_EP3_OUT = 0x04      REQ_EP4_IN  = 0x05
+REQ_EP1_OUT = 0x02  <-  **v2 起废弃**（仅保留编号，固件会对它 stall）
+REQ_EP2_IN  = 0x03      REQ_EP3_OUT = 0x04      REQ_EP4_IN = 0x05
 ```
 
 驱动的 `bmRequestType` 固定为 `TYPE_VENDOR | USB_DIR_OUT` = `0x40`（厂商请求、主机→设备、设备接收者）。
@@ -63,47 +74,41 @@ REQ_EP3_OUT = 0x04      REQ_EP4_IN  = 0x05
 
 ## 数据通道 1：EP1 图像帧
 
-### 时序
+### 时序（协议 v2）
 
-主机每次都**先发一个 EP0 控制请求做"窗口协商"，再从 EP1 批量发出数据**：
+**一次 EP1 批量传输搞定**，矩形和长度都在数据最前面的 12 字节里，没有控制请求：
 
 ```
-usb_control_msg(REQ_EP1_OUT, bmRequestType=0x40, payload=struct req_ep1_out)
-usb_sg_init/usb_sg_wait → EP1 bulk OUT  (压缩流本体)
+usb_sg_init/usb_sg_wait → EP1 bulk OUT  [ struct pud_ep1_header | payload ]
 ```
 
-### 控制请求载荷
+（v1 是"EP0 窗口协商 + EP1 数据"两次传输。实测那个控制请求每次 ~0.14 ms，全速总线上
+还可能撞上一整帧；小矩形连发时省掉它值 **+46%**（32×32 连发 2516 → 3768 rect/s）。）
 
-驱动 `usb.c` 的 `struct req_ep1_out`（小端）：
+### EP1 header 载荷
+
+驱动 `usb.c` 的 `struct pud_ep1_header`（小端，和固件 `include/pud.h` 一致）：
 
 ```c
-struct req_ep1_out {
+struct pud_ep1_header {
     u16 xs;     /* 起始列（含） */
     u16 ys;     /* 起始行（含） */
     u16 xe;     /* 结束列（含！不是排他） */
     u16 ye;     /* 结束行（含！） */
-    u32 size;   /* 随后 EP1 批量数据的字节数 */
+    u32 size;   /* 随后载荷的字节数 */
 };
 ```
 
-- `sizeof(struct req_ep1_out)` = **12** 字节（无填充）。
+- `sizeof(...)` = **12** 字节（无填充）。
+- 驱动把它写在 `pud->encoder_buf` 的**最前面**，编码结果紧跟在后面（`encoder_buf_size`
+  的可用量因此少 12 B），一次 SG 传输把两段一起发出去 —— 不用额外缓冲、也不违反
+  "传输 buffer 必须 DMA 可映射"的约束。
 - `xe`/`ye` 是**闭区间**：驱动传来的是 `band.x2 - 1` / `band.y2 - 1`。
   固件据此算出 `width = xe - xs + 1`。
-- 坐标是**相对于整屏**的绝对坐标，固件内部通过 `ctx.ox/oy` 偏移。
-
-### ⚠️ 已知不一致：控制请求的 wLength 是 16 而不是 12
-
-驱动发送时用的是整个控制缓冲区长度：
-
-```c
-usb_control_msg(..., REQ_EP1_OUT, TYPE_VENDOR | USB_DIR_OUT, 0, 0,
-                pud->ctrl_buf, sizeof(pud->ctrl_buf) /* = 16 */, timeout);
-```
-
-而 `pud->ctrl_buf` 是 `u8 ctrl_buf[16]`，`pud_feed_ctrl_buf()` 只填前 12 字节。
-所以 **wLength = 16，其中只有前 12 字节有意义**，后 4 字节是残留数据。
-固件只按 `struct req_ep1_out` 读 12 字节，因此现在能正常工作 —— 但这是个隐式约定，
-改协议时容易踩。要清理的话，应把 `sizeof(pud->ctrl_buf)` 换成 `sizeof(struct req_ep1_out)`。
+- 坐标是**相对于整屏**的绝对坐标。
+- 固件**两段读**：先一个最大包（64 B，header 一定在里面），再按 `size` 读剩下的。
+  所以传输结束不依赖短包；`size` 报得超过设备缓冲会被 **stall EP1**（大声失败，
+  而不是静默错位）—— 正常的驱动不会碰到。
 
 ### ⚠️ 已知不一致：size 会被向上取偶
 
@@ -115,7 +120,7 @@ if (data_size % 2)
     data_size += 1;
 ```
 
-于是 `req_ep1_out.size` 可能比真实 QOI 长度大 1，固件会多收到一个尾随垃圾字节。
+于是 header 里的 `size` 可能比真实 QOI 长度大 1，固件会多收到一个尾随垃圾字节。
 QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会被消费，所以无害。
 新协议不要依赖"size 精确等于编码长度"。
 
@@ -123,20 +128,22 @@ QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会�
 
 | 常量 | 值 | 位置 | 含义 |
 | --- | --- | --- | --- |
-| `USB_TRANS_MAX_SIZE` | 65535 | 驱动 `pud.h` | 主机侧单次 `size` 上限（受 `u16`/协议约束） |
-| `PUD_DEFAULT_BAND_PIXELS` | `(65535-16)/3` = 21839 | 驱动 `pud.h` | 拿不到能力报告时的兜底单带像素数 |
-| `pud->max_band_pixels` | 21839（RP2350） | 驱动 `drm.c` | **实际使用的**单带上限，来自 `PUD_CMD_GET_CAPS` |
+| `USB_TRANS_MAX_SIZE` | 65535 | 驱动 `pud.h` | 主机侧单次传输上限（含 12 B header） |
+| `PUD_DEFAULT_BAND_PIXELS` | `(65535-12-16)/3` = 21835 | 驱动 `pud.h` | 拿不到能力报告时的兜底单带像素数 |
+| `pud->max_band_pixels` | 21835（RP2350） | 驱动 `drm.c` | **实际使用的**单带上限，来自 `PUD_CMD_GET_CAPS` |
 | `PUD_MAX_TRANSFER` | 65536 / 32768 | 固件 `usbd_vendor.h` | **按板子**定的单次传输与帧槽上限（RP2350 / RP2040） |
 | `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲，尺寸 = `PUD_MAX_TRANSFER`） |
 
-**关键约束**：一帧的压缩结果必须 ≤ **设备上报的** `frame_max`。固件在 REQ_EP1_OUT
-控制阶段就会校验（超限直接 stall EP0，见 `usbd_vendor_ep1_size_ok()`），不再静默截断。
-驱动靠分带（见 [display-and-refresh.md](display-and-refresh.md)）保证这一点。
+**关键约束**：`12 + 一帧的压缩结果` 必须 ≤ **设备上报的** `frame_max`。v2 里固件是在
+读到 header 之后才校验的，超限就 **stall EP1**（`g_ep1_stat_oversize++`）—— 主机会拿到
+一次传输错误，而不是被静默截断。驱动靠分带（见
+[display-and-refresh.md](display-and-refresh.md)）保证这一点。
 
 ### 流控（很重要）
 
-固件**不会**无条件接收 EP1 数据。当解码帧槽全忙时，它收到 EP1 控制请求后
-**故意不武装 EP1 读取**，主机的批量传输因此阻塞等待，直到解码任务腾出槽位才续上。
+固件**不会**无条件接收 EP1 数据。当解码帧槽全忙时它**故意不武装 EP1**，主机的批量
+传输因此阻塞等待，直到解码任务腾出槽位才续上（v2 里这个判断直接发生在武装 EP1 时，
+不再有"控制请求先被挡住"那一步）。
 
 对驱动而言这是透明的：`usb_sg_wait()` 只是多等一会儿。但要注意：
 
@@ -178,9 +185,21 @@ usb_bulk_msg(udev, usb_rcvbulkpipe(udev, EP2_IN_ADDR), data, len, &actual_length
 ```c
 struct pud_caps {
     u32 magic;          /* PUD_CAPS_MAGIC = 0x43445550 ("PUDC") */
-    u32 proto_ver;      /* PUD_PROTO_VER = 1 */
-    u32 frame_max;      /* 单次 EP1 传输上限：RP2350 65536，RP2040 32768 */
-    u32 decoder_type;   /* 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE */
+    u32 proto_ver;      /* PUD_PROTO_VER = 2（固件与驱动必须一致） */
+    u32 frame_max;      /* 单次 EP1 传输上限（含 12 B header）：RP2350 65536 / RP2040 32768 */
+    u32 decoder_type;   /* PUD_DECODER_*: 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE */
+
+    /* 前 16 字节之后的字段是后来追加的；只回 16 字节的老固件仍然合法。 */
+    u16 xres;           /* 面板在它被驱动的坐标系下的尺寸 */
+    u16 yres;
+    u16 pixelclock_khz;
+    u8  rotation;       /* 固件应用的 TFT_ROTATION */
+    u8  bpp;
+    u8  intf_type;
+    u8  tp_polling_period; /* 触摸轮询周期，ms；没有触摸驱动时为 0 */
+    u16 width_mm;       /* 面板有效区，输入设备用它算分辨率（0=未知） */
+    u16 height_mm;
+    u16 flags;          /* PUD_CAPS_TOUCH：设备真的有触摸控制器 */
 };
 ```
 
@@ -189,8 +208,19 @@ struct pud_caps {
 256 KB SRAM，塞不下 RP2350 的 128 KB + 2×64 KB。这样一份驱动就能同时服务两种板子。
 
 - `pud_read_caps()` 把结果落到 `pud->frame_max` / `pud->max_band_pixels`
-  （= `(min(USB_TRANS_MAX_SIZE, frame_max) - 16) / 3`，QOI 最坏 3 B/px + 16 B 头尾），
-  `pud_fb_dirty()` 用它算 `rows`。
+  （= `(min(USB_TRANS_MAX_SIZE, frame_max) - 12 - 16) / 3`，QOI 最坏 3 B/px + 16 B 头尾
+  + 12 B EP1 header），`pud_fb_dirty()` 用它算 `rows`。
+- `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE；
+  0/1/2 目前会报错并置 `needs_full_refresh`（见
+  [display-and-refresh.md](display-and-refresh.md)）。设备没报能力时按 QOI（固件默认）。
+  这个数字是协议字段，**不要重排**。
+- **面板参数也来自这里**（`pud_caps_to_display()`）：分辨率、旋转、bpp、总线时钟都写进
+  每台设备自己的 `pud->display_data`（`pud->display` 指向它），DRM mode 与输入设备的
+  轴范围都由它推出来 —— 驱动里**不再有写死的 480×320**。查询发生在后端分配之前
+  （`pud_query_caps()`，用一个临时堆对象当 DMA 缓冲），所以 `pud_drm_alloc()` /
+  `pud_framebuffer_alloc()` 拿得到参数。
+- 老固件（只回 16 字节）→ 面板参数保持 `pud_default_display`（480×320/旋转 0/16 bpp），
+  日志里写 `old firmware: no panel parameters`。
 - 响应缓冲直接用 `pud->ctrl_buf`（16 B，嵌在堆上的 `struct pud` 里 → DMA 可映射 ✓，
   符合"传输 buffer 不能是栈"的约束），并 `BUILD_BUG_ON` 保证结构体不超过它。
 - **必须校验 `magic`**：老固件没有这条命令，会用 EP2 缓冲里的残留内容应答
