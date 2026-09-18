@@ -21,11 +21,8 @@
 
 #include "pud.h"
 
-// A jpeg image of a panda, binary data
-#include "panda.h"
 
 #include "encoder.h"
-#include "rgb565.h"
 
 #define DRV_NAME "pud"
 
@@ -129,6 +126,18 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
         rc = data_size;     /* the callers count payload bytes */
 
     destroy_timer_on_stack(&ctx.timer);
+
+    /*
+     * A bulk endpoint that stalled stays halted until the host clears it: the
+     * device stalls EP1 on purpose when a host declares more than it can take,
+     * and without this the display never comes back (measured: one oversized
+     * transfer, then "the screen is frozen" while the device itself is idle and
+     * fault-free). Clearing it lets the next damage rectangle go through.
+     */
+    if (rc < 0 && rc != -ETIMEDOUT) {
+        dev_warn_once(pud->dev, "EP1 transfer failed (%d), clearing the halt\n", rc);
+        usb_clear_halt(pud->udev, usb_sndbulkpipe(pud->udev, EP1_OUT_ADDR));
+    }
 
     return rc;
 }
@@ -258,27 +267,6 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
                  pud->has_touch ? "yes" : "no (not compiled into this firmware)");
 }
 
-static int pud_bmp_blit(struct pud *pud, uint8_t *bmp, size_t len)
-{
-    u8 *jpeg_data;
-    ssize_t jpeg_length = 0, actual_length = 0;
-
-    jpeg_data = jpeg_encode_bmp(bmp, len, &jpeg_length);
-    if (!jpeg_data)
-        return -1;
-    actual_length = pud_flush(pud, 0, 0, pud->display->xres - 1,
-                              pud->display->yres - 1, jpeg_data, jpeg_length);
-
-    kvfree(jpeg_data);
-
-    if (actual_length != jpeg_length) {
-        dev_warn(pud->dev, "Failed to blit bmp data");
-        return -1;
-    }
-
-    return 0;
-}
-
 /* Fallback panel configuration, and the starting point pud_apply_caps()
  * overwrites with whatever the device reports. */
 const struct pud_display pud_default_display = {
@@ -333,7 +321,6 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 
     dev_set_drvdata(dev, pud);
 
-    pud_bmp_blit(pud, rgb565, ARRAY_SIZE(rgb565));
 
     rc = pud_register_framebuffer(info);
     if (rc) {
@@ -385,7 +372,6 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
     pud_apply_caps(pud, caps, caps_len);
 
     usb_set_intfdata(intf, pud);
-    pud_bmp_blit(pud, rgb565, ARRAY_SIZE(rgb565));
 
     rc = pud_drm_register(drm);
     if (rc)
