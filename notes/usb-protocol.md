@@ -135,7 +135,7 @@ QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会�
 | `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲，尺寸 = `PUD_MAX_TRANSFER`） |
 
 **关键约束**：`12 + 一帧的压缩结果` 必须 ≤ **设备上报的** `frame_max`。v2 里固件是在
-读到 header 之后才校验的，超限就 **stall EP1**（`g_ep1_stat_oversize++`）—— 主机会拿到
+读到 header 之后才校验的，超限就 **stall EP1**（`g_ep1_stat.oversize++`）—— 主机会拿到
 一次传输错误，而不是被静默截断。驱动靠分带（见
 [display-and-refresh.md](display-and-refresh.md)）保证这一点。
 
