@@ -41,6 +41,13 @@
 #define PUD_ENABLE_INPUT_SUPPORT 1
 #endif
 
+/* EP1 transfer path, selected by the Makefile's PUD_USB_ASYNC: 0 keeps the
+ * synchronous usb_sg interface, 1 uses an asynchronous URB.  usb.c holds both
+ * implementations; drm.c only builds the SG table the synchronous one needs. */
+#ifndef PUD_USB_ASYNC
+#define PUD_USB_ASYNC 0
+#endif
+
 // TODO: Currently only support less than 40000 bytes transfer
 #define USB_TRANS_MAX_SIZE 65535
 
@@ -212,6 +219,13 @@ struct pud {
 	/* Set when a flush fails: that damage rectangle is lost, so the next
 	 * update repaints the whole screen to clear any stale region. */
 	bool needs_full_refresh;
+	/* Consecutive failed EP1 transfers and when the last one happened.  A
+	 * device that went away, or a host controller that wedged, otherwise turns
+	 * every damage rectangle into a transfer that holds a USB worker for the
+	 * whole watchdog -- measured as a load average climbing from 7 to 9 with
+	 * lsusb hanging. */
+	unsigned int flush_fails;
+	unsigned long flush_last_fail;
 	struct drm_device drm;
 	struct drm_simple_display_pipe pipe;
 	struct drm_connector connector;

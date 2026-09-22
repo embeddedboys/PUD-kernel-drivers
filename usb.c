@@ -25,6 +25,18 @@
 
 #define DRV_NAME "pud"
 
+/* Consecutive EP1 failures after which a flush only tries once per second. */
+#define PUD_FLUSH_FAIL_MAX 3
+
+/*
+ * EP1 transfer path (PUD_USB_ASYNC, defined in pud.h): 0 keeps the synchronous
+ * usb_sg interface, 1 uses an asynchronous URB.  The two share no state, so
+ * only one is ever built -- there is nothing to gain from carrying both in one
+ * binary.
+ */
+/* Watchdog for one EP1 transfer, used by both paths. */
+#define PUD_EP1_TIMEOUT_MS 3000
+
 static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
                         size_t len)
 {
@@ -52,6 +64,99 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
 	return actual_length;
 }
 
+/* ---------------------------------------------------------------------------
+ * EP1 transfer, one of two implementations
+ *
+ * Both hand back the payload byte count on success (the callers count payload
+ * bytes, not the header) or a negative errno, and both are expected to return
+ * rather than park forever: the caller runs in the DRM commit path, so a
+ * transfer that never comes back holds a modeset and wedges the session.
+ * ------------------------------------------------------------------------- */
+
+#if PUD_USB_ASYNC
+
+/*
+ * Asynchronous path: one URB per transfer, submitted with usb_submit_urb()
+ * and waited on with a completion.
+ *
+ * The buffer is the same DMA-coherent encoder_buf the SG path uses, so the URB
+ * carries its DMA address directly (URB_NO_TRANSFER_DMA_MAP) instead of asking
+ * the USB core to map a vmap address -- the reason the synchronous path builds
+ * an SG table in the first place (see notes/pitfalls.md 1.2).
+ *
+ * The caller still blocks until the transfer is done; what changes is how it
+ * can be cancelled.  A timeout ends in usb_kill_urb(), which unlinks this one
+ * URB and waits for its completion handler, instead of usb_sg_cancel() having
+ * to unwind the whole usb_sg_request.
+ */
+struct pud_ep1_async_ctx {
+	struct completion done;
+	int status;
+	unsigned int actual;
+};
+
+static void pud_ep1_urb_complete(struct urb *urb)
+{
+	struct pud_ep1_async_ctx *ctx = urb->context;
+
+	ctx->status = urb->status;
+	ctx->actual = urb->actual_length;
+	complete(&ctx->done);
+}
+
+static int pud_ep1_transfer(struct pud *pud, size_t len)
+{
+	struct pud_ep1_async_ctx ctx;
+	struct urb *urb;
+	unsigned long left;
+	int rc;
+
+	urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!urb)
+		return -ENOMEM;
+
+	init_completion(&ctx.done);
+	ctx.status = 0;
+	ctx.actual = 0;
+
+	usb_fill_bulk_urb(urb, pud->udev,
+	                  usb_sndbulkpipe(pud->udev, EP1_OUT_ADDR),
+	                  pud->encoder_buf, len, pud_ep1_urb_complete, &ctx);
+	urb->transfer_dma = pud->encoder_dma;
+	urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+
+	rc = usb_submit_urb(urb, GFP_KERNEL);
+	if (rc) {
+		usb_free_urb(urb);
+		return rc;
+	}
+
+	left = wait_for_completion_timeout(&ctx.done,
+	                                   msecs_to_jiffies(PUD_EP1_TIMEOUT_MS));
+	if (!left) {
+		/* usb_kill_urb() is the documented cancel path for a single URB:
+		 * it unlinks it and returns once the completion handler has run,
+		 * so the URB and its context are safe to free afterwards. */
+		usb_kill_urb(urb);
+		rc = -ETIMEDOUT;
+	} else if (ctx.status < 0) {
+		rc = ctx.status;
+	} else if (ctx.actual != len) {
+		rc = -EIO;
+	} else {
+		rc = len - PUD_EP1_HEADER_SIZE; /* callers count payload bytes */
+	}
+
+	usb_free_urb(urb);
+	return rc;
+}
+
+#else /* !PUD_USB_ASYNC */
+
+/*
+ * Synchronous path: usb_sg_init()/usb_sg_wait(), with a stack timer as the
+ * watchdog.  Kept as the default while the two are compared on hardware.
+ */
 struct pud_usb_bulk_context {
 	struct timer_list timer;
 	struct usb_sg_request sgr;
@@ -64,15 +169,60 @@ static void pud_usb_bulk_timeout(struct timer_list *t)
 	usb_sg_cancel(&ctx->sgr);
 }
 
+static int pud_ep1_transfer(struct pud *pud, size_t len)
+{
+	struct pud_usb_bulk_context ctx;
+	int rc;
+
+	rc = usb_sg_init(&ctx.sgr, pud->udev,
+	                 usb_sndbulkpipe(pud->udev, EP1_OUT_ADDR), 0,
+	                 pud->bulk_sgt.sgl, pud->bulk_sgt.nents, len, GFP_KERNEL);
+
+	/* timeout routine in case the device stops reading */
+	timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
+	mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(PUD_EP1_TIMEOUT_MS));
+
+	usb_sg_wait(&ctx.sgr);
+
+	if (!timer_delete_sync(&ctx.timer))
+		rc = -ETIMEDOUT;
+	else if (ctx.sgr.status < 0)
+		rc = ctx.sgr.status;
+	else if (ctx.sgr.bytes != len)
+		rc = -EIO;
+	else
+		rc = len - PUD_EP1_HEADER_SIZE; /* callers count payload bytes */
+
+	destroy_timer_on_stack(&ctx.timer);
+	return rc;
+}
+
+#endif /* PUD_USB_ASYNC */
+
 ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
                   const u8 jpeg_data[], size_t data_size)
 {
-	struct usb_device *udev = pud->udev;
-	struct pud_usb_bulk_context ctx;
 	struct pud_ep1_header *hdr = (struct pud_ep1_header *)pud->encoder_buf;
 	int rc;
 
-	/* data_size must be even for RP2350 */
+	/*
+	 * After a few failures in a row, submit at most one transfer per second.
+	 * A failing transfer holds a USB worker for the whole watchdog, so a
+	 * device that is gone (or a host controller that wedged) would otherwise
+	 * be hammered as fast as damage arrives.  One try per second still picks
+	 * the display back up once the device is there again.
+	 */
+	if (pud->flush_fails >= PUD_FLUSH_FAIL_MAX &&
+	    time_before(jiffies, pud->flush_last_fail + msecs_to_jiffies(1000)))
+		return -EIO;
+
+	/*
+	 * Round the payload up to even.  The device does not require this any
+	 * more (measured 2026-09: odd and even both land), but firmware built
+	 * before that rejected an odd size outright -- and silently, so a host
+	 * would just see half its frames never arrive.  One padding byte is
+	 * cheaper than a compatibility matrix; see notes/usb-protocol.md.
+	 */
 	if (data_size % 2)
 		data_size += 1;
 
@@ -93,34 +243,36 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 		memcpy(pud->encoder_buf + PUD_EP1_HEADER_SIZE, jpeg_data,
 		       data_size);
 
-	rc = usb_sg_init(&ctx.sgr, pud->udev,
-	                 usb_sndbulkpipe(udev, EP1_OUT_ADDR), 0,
-	                 pud->bulk_sgt.sgl, pud->bulk_sgt.nents,
-	                 PUD_EP1_HEADER_SIZE + data_size, GFP_KERNEL);
+	/* one transfer carries the header and the payload (see pud_ep1_transfer) */
+	rc = pud_ep1_transfer(pud, PUD_EP1_HEADER_SIZE + data_size);
 
-	/* timeout routine in case the device stops reading */
-	timer_setup_on_stack(&ctx.timer, pud_usb_bulk_timeout, 0);
-	mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(3000));
+	if (rc < 0) {
+		pud->flush_fails++;
+		pud->flush_last_fail = jiffies;
 
-	usb_sg_wait(&ctx.sgr);
+		/* One line per failure state rather than one per rectangle: a
+		 * wedged device can fail hundreds of times a minute. */
+		dev_warn_ratelimited(
+		        pud->dev,
+		        "EP1 transfer failed (%d) for %ux%u+%u+%u, %zu bytes\n",
+		        rc, xe - x + 1, ye - y + 1, x, y, data_size);
 
-	if (!timer_delete_sync(&ctx.timer))
-		rc = -ETIMEDOUT;
-	else if (ctx.sgr.status < 0)
-		rc = ctx.sgr.status;
-	else if (ctx.sgr.bytes != PUD_EP1_HEADER_SIZE + data_size)
-		rc = -EIO;
-	else
-		rc = data_size; /* the callers count payload bytes */
-
-	destroy_timer_on_stack(&ctx.timer);
+		if (pud->flush_fails == PUD_FLUSH_FAIL_MAX)
+			dev_err(pud->dev,
+			        "EP1 failed %u times in a row, trying once per second\n",
+			        pud->flush_fails);
+	} else {
+		pud->flush_fails = 0;
+	}
 
 	/*
-	 * A bulk endpoint that stalled stays halted until the host clears it: the
-	 * device stalls EP1 on purpose when a host declares more than it can take,
-	 * and without this the display never comes back (measured: one oversized
-	 * transfer, then "the screen is frozen" while the device itself is idle and
-	 * fault-free). Clearing it lets the next damage rectangle go through.
+	 * Defensive only: a bulk endpoint that has stalled stays halted until the
+	 * host clears it.  The shipped firmware drops a header it cannot believe
+	 * instead of stalling EP1 (see the initial_mode note in drm.c, and the
+	 * firmware's notes/usb-protocol.md), so a stall should not reach here at
+	 * all -- measured: an oversized transfer leaves g_ep1_stat.oversize >= 1
+	 * and the host sees no error.  This stays for an older firmware, or a
+	 * controller-level stall, where without it the display never comes back.
 	 */
 	if (rc < 0 && rc != -ETIMEDOUT) {
 		dev_warn_once(pud->dev,
@@ -413,6 +565,12 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	struct pud *pud;
 	u8 *serial;
 	int caps_len, rc;
+
+	/* Which EP1 path this build carries -- the two differ exactly where the
+	 * "host controller wedged, transfer never returns" failure shows up. */
+	dev_info(&intf->dev, "EP1 transfer path: %s\n",
+	         PUD_USB_ASYNC ? "async URB (usb_submit_urb)"
+	                       : "sync usb_sg (usb_sg_init)");
 
 	/* usb_bulk_msg() needs DMA-mappable buffers, not stack ones */
 	serial = kzalloc(8, GFP_KERNEL);

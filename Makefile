@@ -68,6 +68,16 @@ endif
 
 MODULE_NAME:=pud
 
+# ---------------------------------------------------------------------------
+# EP1 transfer path.  0 (default) keeps the synchronous usb_sg interface,
+# 1 builds the asynchronous URB path instead.  A build option rather than a
+# module parameter: the two share no state, so one binary only ever wants one.
+#
+#   make modules PUD_USB_ASYNC=1
+# ---------------------------------------------------------------------------
+PUD_USB_ASYNC ?= 0
+ccflags-y += -DPUD_USB_ASYNC=$(PUD_USB_ASYNC)
+
 all: modules
 	$(MAKE) -C tests/
 

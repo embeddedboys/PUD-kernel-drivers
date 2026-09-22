@@ -373,11 +373,13 @@ static int pud_drm_dev_init_with_formats(
 	static const uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR,
 		                              DRM_FORMAT_MOD_INVALID };
 	struct drm_device *drm = &pud->drm;
+	size_t enc_size;
+	int rc;
+#if !PUD_USB_ASYNC
 	struct page **pages;
 	unsigned int i, num_pages;
-	size_t enc_size;
 	void *ptr;
-	int rc;
+#endif
 
 	pr_info("%s\n", __func__);
 
@@ -392,10 +394,11 @@ static int pud_drm_dev_init_with_formats(
 		return -ENOMEM;
 
 	/* The encoder output buffer is DMA-allocated so its pages are within the
-	 * USB controller's DMA range: the bulk SG transfer can map them directly
-	 * (no swiotlb bounce). dma_alloc_coherent() returns a vmap address for
-	 * the CPU encoder to write to; the underlying pages are obtained with
-	 * vmalloc_to_page() for the SG list.
+	 * USB controller's DMA range (no swiotlb bounce).  dma_alloc_coherent()
+	 * returns a vmap address for the CPU encoder to write to.  The
+	 * synchronous usb_sg path transfers from an SG table built over the
+	 * underlying pages; the asynchronous path hands the URB the buffer's DMA
+	 * address directly and does not need one.
 	 *
 	 * It must hold the worst-case QOI stream for a full frame
 	 * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
@@ -410,6 +413,7 @@ static int pud_drm_dev_init_with_formats(
 		return -ENOMEM;
 	pud->encoder_buf_size = enc_size;
 
+#if !PUD_USB_ASYNC
 	num_pages = DIV_ROUND_UP(enc_size, PAGE_SIZE);
 	pages = kmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
 	if (!pages)
@@ -424,6 +428,7 @@ static int pud_drm_dev_init_with_formats(
 	kfree(pages);
 	if (rc)
 		return rc;
+#endif
 
 	/* TODO: use debugfs to set params */
 	// pud->encoder_quality = JPEGE_Q_BEST;
@@ -519,7 +524,9 @@ static int pud_drm_dev_init(struct pud *pud,
 
 static void pud_drm_release_buffers(struct pud *pud)
 {
+#if !PUD_USB_ASYNC
 	sg_free_table(&pud->bulk_sgt);
+#endif
 	if (pud->encoder_buf) {
 		dma_free_coherent(pud->drm.dev, pud->encoder_buf_size,
 		                  pud->encoder_buf, pud->encoder_dma);
