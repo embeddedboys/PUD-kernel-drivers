@@ -146,7 +146,10 @@ pud_fb_dirty()                       drm.c
    ▼
 pud_flush()                          usb.c
    │  ① EP1 bulk：12 B header (xs,ys,xe,ye,size) + 压缩载荷（v2：不再有控制请求）
-   │  ② usb_sg_init() + usb_sg_wait() 从 EP1 批量发出压缩流
+   │  ② 从 EP1 批量发出压缩流，传输路径由 PUD_USB_ASYNC 选：
+   │     0 = usb_sg_init() + usb_sg_wait()（同步，栈上 timer 看门狗）
+   │     1 = usb_submit_urb() + completion（异步，usb_kill_urb 取消）
+   │     见 notes/build-and-test.md 的"构建选项"
    ▼
 Pico 固件：解码 → TFT
 ```

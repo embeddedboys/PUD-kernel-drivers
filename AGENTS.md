@@ -47,6 +47,12 @@
 - 验证面：`modinfo pud.ko | grep vermagic`、`dmesg | grep -i pud`。
   细节见 [`notes/build-and-test.md`](notes/build-and-test.md)。
 
+可调构建开关：
+
+| 开关 | 默认 | 作用 |
+| --- | --- | --- |
+| `PUD_USB_ASYNC` | `0` | EP1 传输路径：`0` = 同步 `usb_sg`（`usb_sg_init`/`usb_sg_wait`），`1` = 异步 URB（`usb_submit_urb` + completion，`usb_kill_urb` 取消）。两条路径状态不共享，一个镜像只编一条；对比结论见 [`notes/build-and-test.md`](notes/build-and-test.md) |
+
 ## 架构不变量（动了就坏）
 
 1. **USB 传输的 buffer 必须 DMA 可映射。** 不能是栈（`object_is_on_stack`），
@@ -55,7 +61,8 @@
    - `pud->ctrl_buf`（嵌在 `struct pud` 里 → 堆）✓
    - `pud->encoder_buf` 是 EP1 的 DMA 源，**必须 `dma_alloc_coherent`** ✓
    - `pud->tx_buf` 只给 CPU 用，`vmalloc` 可以 ✓
-   - `pud_flush()` 里栈上的 `struct pud_usb_bulk_context` 是**描述符不是 buffer**，
+   - `pud_flush()` 里栈上的 `struct pud_usb_bulk_context`（同步路径）与
+     `struct pud_ep1_async_ctx`（异步路径）是**描述符不是 buffer**，
      合法 —— 别"顺手"改成堆分配。
 2. **`pud_drm_alloc()` 失败返回 `ERR_PTR`，必须 `IS_ERR()` 判断**，不能用 `if (!drm)`。
 3. **一帧的压缩结果必须 ≤ 设备上报的单次传输上限**，靠 `pud_fb_dirty()` 的分带

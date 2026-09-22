@@ -142,7 +142,7 @@ drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
 | --- | --- | --- | --- |
 | `pud->tx_buf` | `vmalloc` | `hdisplay * vdisplay * 2`（480×320 → 307200） | RGB565 转换目标（**只给 CPU 用**，不参与 DMA） |
 | `pud->encoder_buf` | `dma_alloc_coherent` | `rgb565_qoi_max_compressed_size(h*v)` = `8 + h*v*3 + 8`（480×320 → 460816） | QOI/RLE 编码输出 + DMA 源 |
-| `pud->bulk_sgt` | `sg_alloc_table_from_pages`（页来自 `vmalloc_to_page(encoder_buf)`） | 同上 | 批量传输的 SG 表 |
+| `pud->bulk_sgt` | `sg_alloc_table_from_pages`（页来自 `vmalloc_to_page(encoder_buf)`） | 同上 | **同步** `usb_sg` 路径的 SG 表；`PUD_USB_ASYNC=1` 时**完全不分配**（异步 URB 直接填 `transfer_dma = encoder_dma`） |
 
 `hdisplay`/`vdisplay` 来自 **DRM mode，而 mode 由设备上报的面板参数（`PUD_CMD_GET_CAPS`）
 在 probe 时生成**（`pud_mode_init()`），不再是编译期常量 —— 换面板不用改驱动。
@@ -150,15 +150,18 @@ drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
 **为什么 encoder_buf 必须是 `dma_alloc_coherent` 而不是 `vmalloc`**：
 `tx_buf` 只在 CPU 侧读写，`vmalloc` 没问题；但 `encoder_buf` 要被 USB 控制器 DMA 读取，
 `vmalloc` 的内存会被直接拒绝（见 [pitfalls.md](pitfalls.md) 的 "rejecting DMA map of vmalloc memory"）。
-`dma_alloc_coherent` 返回的虽然是 vmap 地址（CPU 可写），但底层页在 DMA 可达范围内，
-再用 `vmalloc_to_page()` 组 SG 表给 `usb_sg_init()` 用。
+`dma_alloc_coherent` 返回的虽然是 vmap 地址（CPU 可写），但底层页在 DMA 可达范围内：
+**同步**路径再用 `vmalloc_to_page()` 组 SG 表给 `usb_sg_init()`；**异步**路径直接把
+`encoder_dma` 填进 URB（`URB_NO_TRANSFER_DMA_MAP`），连 SG 表都不建。
 
 **encoder_buf 必须能装下最坏情况**：`rgb565_qoi_compress()` 在
 `output_capacity < max_compressed_size` 时**直接返回 0**（不压缩）。所以按最坏情况申请。
 
 ## 失败兜底：`needs_full_refresh`
 
-`pud_flush()` 是同步的（内部 `usb_sg_wait()`），返回实际字节数或负 errno。
+`pud_flush()` **对调用方是阻塞的**，返回实际字节数或负 errno。阻塞方式由
+`PUD_USB_ASYNC` 决定（见 [build-and-test.md](build-and-test.md) 的"构建选项"）：
+同步是 `usb_sg_wait()`，异步是 `wait_for_completion_timeout()` + `usb_kill_urb()`。
 一旦失败，**这一帧的 damage 就永远丢了** —— 那一块像素会一直保持旧内容，
 直到应用恰好重绘它（典型表现就是"残影"）。
 

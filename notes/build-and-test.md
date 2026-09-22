@@ -20,6 +20,37 @@ make clean     KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
 链接模块所需的生成文件（`scripts/module.lds`、`Module.symvers`、`.config`）都在 objtree 里，
 源码树里没有。不传就会出现 `scripts/module.lds: No such file` 之类的失败。
 
+## 构建选项
+
+| 变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `PUD_USB_ASYNC` | `0` | EP1 传输路径。`0` = 同步 `usb_sg`（`usb_sg_init`/`usb_sg_wait`，栈上 timer → `usb_sg_cancel`）；`1` = 异步 URB（`usb_submit_urb` + completion，`wait_for_completion_timeout` → `usb_kill_urb`）。两条路径状态不共享，一个镜像只编一条 |
+
+```bash
+make modules KERN_DIR=<...> PUD_USB_ASYNC=1
+```
+
+异步路径的 DMA 源仍是 `pud->encoder_buf`（`dma_alloc_coherent`），URB 直接带
+`URB_NO_TRANSFER_DMA_MAP` + `transfer_dma = pud->encoder_dma`，**不**让 USB 核心去 map
+vmap 地址 —— 这正是同步路径要建 SG 表的原因（见 [pitfalls.md](pitfalls.md) 1.2）。
+两条路径的成功返回值相同（payload 字节数），调用方（`pud_flush`、DRM commit）不变。
+
+### 真机对比结论（2026-09）
+
+板子：RK3588 系 xHCI（`fc400000.usb`）+ RP2350 固件。两个自然失败场景下，两条路径
+**表现一致**，都没有把板子弄卡：
+
+| 场景 | 同步 `usb_sg` | 异步 URB |
+| --- | --- | --- |
+| 设备停摆（SWD halt 住 Pico）后触发 flush | `-ETIMEDOUT`（约 3 s）后返回；`rmmod` 5183 ms 成功 | 同样 `-ETIMEDOUT`；`rmmod` 5247 ms 成功 |
+| 压屏中断开重枚举（复位 Pico） | 干净重新 probe，板子保持响应 | 同样 |
+
+**没能在当前硬件上复现出同步路径卡死**，因为触发点已经在固件侧消失：固件对一个不可信
+header（`12+size` 超限、矩形越界）是**丢弃并重新武装**，不再 stall EP1
+（`g_ep1_stat.oversize` 增长，宿主看不到错误；用临时超限补丁验证）。历史上是
+"stall → 主机 `clear_halt` 重试"才把宿主控制器卡死到连板子都重启不干净，所以
+`pud_flush()` 里那段 `usb_clear_halt()` 现在只是防御（老固件/控制器级 stall）。
+
 ## 两种构建模式
 
 ### A. 厂商内核源码树（6.1.118 分支，objtree 模式）

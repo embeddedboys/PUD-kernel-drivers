@@ -94,12 +94,12 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 
 **现场**：`pud->tx_buf` / `pud->encoder_buf` 最初用 `kmalloc` 分配（显示分辨率较大时
 直接 "page allocation failure: order:7"），改成 `vmalloc` 之后又撞上这条 ——
-`encoder_buf` 要作为 `usb_sg` 的 DMA 源。
+`encoder_buf` 要作为 EP1 bulk 传输的 DMA 源（同步 `usb_sg` 与异步 URB 都一样）。
 
 **修法**：区分用途。
 - `tx_buf` 只给 CPU 读写 → `vmalloc` 没问题；
-- `encoder_buf` 要被 DMA 读 → 必须 `dma_alloc_coherent`，
-  再用 `vmalloc_to_page()` 取底层页组 SG 表。
+- `encoder_buf` 要被 DMA 读 → 必须 `dma_alloc_coherent`。之后同步路径用
+  `vmalloc_to_page()` 取底层页组 SG 表，异步路径把 `encoder_dma` 直接填进 URB。
 
 **通用规则**：交给 `usb_submit_urb` / `usb_control_msg` / `usb_bulk_msg` /
 `usb_interrupt_msg` / `usb_fill_*_urb` / `usb_sg_init` 的 buffer 必须是：
@@ -118,11 +118,12 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 | `pud_transfer()` EP0 | control OUT | `pud->ctrl_buf`（嵌在 `struct pud`，`devm_drm_dev_alloc` → 堆） | ✅ |
 | `pud_transfer()` EP2 | bulk IN | 调用者传入（`pud_read_unique_id` → `kzalloc(8)`） | ✅ |
 | `pud_flush()` EP0 | control OUT | `pud->ctrl_buf` | ✅ |
-| `pud_flush()` EP1 | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
+| `pud_flush()` EP1（同步） | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
+| `pud_flush()` EP1（异步） | bulk OUT（`usb_submit_urb`） | `pud->encoder_buf`，`transfer_dma = encoder_dma` + `URB_NO_TRANSFER_DMA_MAP` | ✅ |
 | `input.c` REQ_EP4_IN | control OUT | `NULL, 0` → 条件 1 不成立，DMA 分支跳过 | ✅ |
 | `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kmalloc` | ✅ |
 
-**容易误判的一处**：`pud_flush()` 里
+**容易误判的一处**：同步路径（`PUD_USB_ASYNC=0`）的 `pud_flush()` 里
 
 ```c
 struct pud_usb_bulk_context ctx;   /* 含 usb_sg_request + timer_list，确实在栈上 */
@@ -132,6 +133,11 @@ struct pud_usb_bulk_context ctx;   /* 含 usb_sg_request + timer_list，确实�
 `usb_alloc_urb()`，URB 的 buffer 指向 SGL 里的 coherent 内存；
 `timer_setup_on_stack()`/`destroy_timer_on_stack()` 也是短生命周期 timer 的官方用法。
 **不要"顺手"改成堆分配**（栈上 timer 是刻意避免 kmalloc 失败路径）。
+
+异步路径的 `struct pud_ep1_async_ctx`（completion + status + actual）同样在栈上，同样合法：
+调用方会一直等到 completion 或 `usb_kill_urb()` 返回才离开函数，URB 在途时栈帧不会被复用。
+**这是本函数自己保证的前提**——异步接口本身不保证，谁要改成"提交后不等待就返回"，
+就必须把 context 挪到能活过传输的地方。
 
 ### 1.4 swiotlb "buffer is full"
 
@@ -208,7 +214,8 @@ if (rc < 0)
 ### 2.3 协议层的两处不一致
 
 `usb_control_msg(..., sizeof(pud->ctrl_buf) /* 16 */, ...)` 但 `struct req_ep1_out` 只有
-12 字节；`size` 还会被 `pud_flush()` 向上取偶加 1。
+12 字节；`size` 还会被 `pud_flush()` 向上取偶加 1（设备奇偶都接受，取偶只为兼容 2026-09
+之前会拒绝奇数 `size` 的老固件）。现在两者都无害。
 细节见 [usb-protocol.md](usb-protocol.md) 的"已知不一致"两节 —— 目前无害但脆。
 
 ---

@@ -79,7 +79,9 @@ REQ_EP2_IN  = 0x03      REQ_EP3_OUT = 0x04      REQ_EP4_IN = 0x05
 **一次 EP1 批量传输搞定**，矩形和长度都在数据最前面的 12 字节里，没有控制请求：
 
 ```
-usb_sg_init/usb_sg_wait → EP1 bulk OUT  [ struct pud_ep1_header | payload ]
+EP1 bulk OUT  [ struct pud_ep1_header | payload ]
+   同步 usb_sg_init/usb_sg_wait 或 异步 usb_submit_urb + completion
+   （构建时由 PUD_USB_ASYNC 选，见 notes/build-and-test.md）
 ```
 
 （v1 是"EP0 窗口协商 + EP1 数据"两次传输。实测那个控制请求每次 ~0.14 ms，全速总线上
@@ -107,22 +109,30 @@ struct pud_ep1_header {
   固件据此算出 `width = xe - xs + 1`。
 - 坐标是**相对于整屏**的绝对坐标。
 - 固件**两段读**：先一个最大包（64 B，header 一定在里面），再按 `size` 读剩下的。
-  所以传输结束不依赖短包；`size` 报得超过设备缓冲会被 **stall EP1**（大声失败，
-  而不是静默错位）—— 正常的驱动不会碰到。
+  所以传输结束不依赖短包。
+- 一个**不可信**的 header（`12 + size` 超过设备缓冲，或矩形越界）会被
+  固件**丢弃并重新武装**，不是 stall（`g_ep1_stat.oversize++` / `.bad++`）。这是设备侧
+  刻意为之：stall 会让主机的写失败，而"主机 `clear_halt` 后重试"实测会把宿主控制器
+  卡死到连板子都重启不干净（见固件 `src/cherryusb/usb.c` 里
+  `usbd_vendor_ep1_bulk_out()` 的注释）。正常驱动靠分带不会送出这种 header。
 
-### ⚠️ 已知不一致：size 会被向上取偶
+### `size` 的奇偶：不要求，但主机最好仍然取偶
 
-`pud_flush()` 开头：
+驱动 `pud_flush()` 会把 `data_size` 向上取到偶数：
 
 ```c
-/* data_size must be even for RP2350 */
+/* kept for firmware built before 2026-09, which rejected an odd size */
 if (data_size % 2)
     data_size += 1;
 ```
 
-于是 header 里的 `size` 可能比真实 QOI 长度大 1，固件会多收到一个尾随垃圾字节。
-QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会被消费，所以无害。
-新协议不要依赖"size 精确等于编码长度"。
+**设备已经不再要求偶数**（2026-09 实测：RP2350 上 4 奇 4 偶、987~43271 B 全部落地，
+`got == total`）。老固件会拒绝奇数 `size`：丢弃这一笔、计进 `g_ep1_stat.oversize`，
+**宿主看不到任何错误** —— 所以取偶这一行留着，代价是每笔多 1 字节，换来对老固件的兼容。
+`scripts/pud_usb.py` 与 LVGL 模板同理。
+
+取偶之后 header 里的 `size` 可能比真实 QOI 长度大 1，固件会多收到一个尾随字节；QOI 解码
+读到结束标记（`00..01`）即停，多余字节不会被消费。**不要依赖"size 精确等于编码长度"。**
 
 ### 传输上限
 
@@ -135,9 +145,13 @@ QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会�
 | `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲，尺寸 = `PUD_MAX_TRANSFER`） |
 
 **关键约束**：`12 + 一帧的压缩结果` 必须 ≤ **设备上报的** `frame_max`。v2 里固件是在
-读到 header 之后才校验的，超限就 **stall EP1**（`g_ep1_stat.oversize++`）—— 主机会拿到
-一次传输错误，而不是被静默截断。驱动靠分带（见
+读到 header 之后才校验的，超限的那一笔会被**丢弃**（`g_ep1_stat.oversize++`，宿主看不到
+错误），既不是静默截断、也不是 stall。驱动靠分带（见
 [display-and-refresh.md](display-and-refresh.md)）保证这一点。
+
+> 实测（2026-09，固件 `b88c42…`）：用临时超限补丁故意声明 1 MiB 的 payload 后，宿主
+> **没有**拿到任何传输错误，固件侧 `g_ep1_stat.oversize` 增长——即走的是丢弃分支。
+> `usb_clear_halt()` 那条路径在当前固件上够不到。
 
 ### 流控（很重要）
 
@@ -145,9 +159,11 @@ QOI 解码在读到结束标记（`00..01`）后即停止，多余字节不会�
 传输因此阻塞等待，直到解码任务腾出槽位才续上（v2 里这个判断直接发生在武装 EP1 时，
 不再有"控制请求先被挡住"那一步）。
 
-对驱动而言这是透明的：`usb_sg_wait()` 只是多等一会儿。但要注意：
+对驱动而言这是透明的：一次传输只是多等一会儿。但要注意：
 
-- `pud_flush()` 里有个 **3 秒看门狗**（`pud_usb_bulk_timeout()` → `usb_sg_cancel()`）。
+- `pud_flush()` 里有个 **3 秒看门狗**，两条路径实现不同：同步走栈上 timer →
+  `usb_sg_cancel()`，异步走 `wait_for_completion_timeout()` → `usb_kill_urb()`
+  （见 [build-and-test.md](build-and-test.md) 的 `PUD_USB_ASYNC`）。
   只要固件解码正常（毫秒级），就不会触发。
 - 一旦真的超时，这一帧的 damage 就永久丢失（`pud_fb_dirty()` 曾静默忽略返回值的坑，
   现在会置 `needs_full_refresh` 兜底，见 [display-and-refresh.md](display-and-refresh.md)）。
