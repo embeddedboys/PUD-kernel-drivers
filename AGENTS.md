@@ -113,6 +113,24 @@
   只读检查后要 `monitor resume`，**别用 `monitor reset run`**（会清状态）。
 - **不加载驱动也能测全部功能**：用固件仓的 `scripts/`（用户空间 pyusb）。
 
+## 板子上的工作方式（省时间，都是踩过的坑）
+
+1. **一轮只做一件事**：脚本先写好，一次 `scp` 上去跑完 —— 不要在一轮里串多次 ssh、
+   gdb、`make modules`。板子一卡，一轮能白等十分钟。
+2. **可能挂住的命令一律套 `timeout`**（`lsusb`、`dmesg`、debugfs 读写、`make`、`rmmod`）：
+   USB 栈一卡，`lsusb` 会永远不返回，没有 timeout 就整轮坐在工具自己的上限上。
+   **工具调用自己的超时压到 ≤4 分钟**，挂住要立刻暴露。
+3. **gdb 读固件是 30~60 s 级**：一轮最多读一次，能用 `dmesg` 说清就不读。
+4. **驱动只编译一次**：改完一次 `make modules`，`pud.ko` 留在板子上复用。
+5. 板子重启后**总线与路径会变**（`6-1` → `3-1`）：脚本里动态发现，别写死接口路径。
+6. 下结论前**两侧对账**：主机 `dmesg`/`usbmon` 与设备侧计数器。
+7. **EP1 连续失败就先卸载再查** ✗：一次 EP1 stall 足以把主机控制器卡住 ——
+   之后 `usb_sg_wait()`/`usb_sg_cancel()` 不返回，DRM modeset 锁被占住，
+   `/sys/kernel/debug/dri/*/state` 都读不出来，界面永久黑屏。别靠反复 reload 试探。
+   **注**：当前固件对超限的 EP1 数据是**丢弃并重新武装**、不再 stall（2026-09 实测，
+   见 [notes/build-and-test.md](notes/build-and-test.md)），正常路径上够不到这个触发点；
+   这条纪律保留，是因为老固件与控制器级 stall 仍可能发生。
+
 ## 代码约定
 
 - C 风格用**内核风格：tab + 8 宽缩进**（仓库根的 `.clang-format` 取自内核，唯一偏离是
