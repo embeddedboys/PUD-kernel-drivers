@@ -590,8 +590,80 @@ void pud_drm_release(struct drm_device *drm)
 	pud_drm_release_buffers(pud);
 }
 
+/*
+ * Set a mode (and so light the panel) from probe, without userspace asking.
+ * Off by default: it puts the driver in the sending path with nobody else in
+ * the loop, and that is only safe once the device drops a header it cannot
+ * believe instead of stalling EP1 -- a stall in this state was measured to wedge
+ * the host controller badly enough that the board would not even reboot
+ * cleanly (see notes/ on the firmware side).  Hardware verified with
+ * initial_mode=1 once the firmware resynchronises on its own.
+ */
+static bool initial_mode;
+module_param(initial_mode, bool, 0444);
+MODULE_PARM_DESC(
+        initial_mode,
+        "set a mode from probe so the panel lights up without userspace");
+
+/*
+ * Put a mode on the panel at probe time.
+ *
+ * The driver sends pixels only from its flush callback, and that runs for a
+ * commit which leaves the CRTC active with the framebuffer on the plane.  The
+ * DRM fbdev emulation creates the framebuffer and lets fbcon bind to it, but
+ * nothing commits a mode by itself: fbcon never calls fb_set_par here (measured
+ * with and without a DRM master), and a desktop session does not drive this
+ * device either -- mutter keeps a GPU that is not the boot GPU for rendering
+ * only, so it never creates a monitor on it (GNOME journal: "Added device
+ * '/dev/dri/cardN' (pud-drm)" and "Created gbm renderer", and no monitor line).
+ * A machine where this is the only DRM device would have a compositor to do it,
+ * but a headless one still shows nothing.
+ *
+ * So commit the fixed mode once, from here.  Userspace is free to replace the
+ * state afterwards: this is a first commit, not a preference, and the panel
+ * works whether or not anybody else ever commits anything.  Note that
+ * drm_fb_helper_restore_fbdev_mode_unlocked() cannot be used for it -- it gives
+ * up when a userspace DRM master exists (drm_fb_helper_is_bound()).
+ */
+static void pud_drm_set_initial_mode(struct pud *pud)
+{
+	struct drm_device *drm = &pud->drm;
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_connector *connectors[1] = { &pud->connector };
+	struct drm_mode_set set = {
+		.crtc = &pud->pipe.crtc,
+		.mode = &pud->mode,
+		.fb = drm->fb_helper ? drm->fb_helper->fb : NULL,
+		.connectors = connectors,
+		.num_connectors = 1,
+		.x = 0,
+		.y = 0,
+	};
+	int rc;
+
+	if (!set.fb) {
+		pr_warn("no framebuffer to set the initial mode with\n");
+		return;
+	}
+
+	drm_modeset_acquire_init(&ctx, 0);
+	for (;;) {
+		rc = drm_atomic_helper_set_config(&set, &ctx);
+		if (rc != -EDEADLK)
+			break;
+		drm_modeset_backoff(&ctx);
+	}
+	drm_modeset_acquire_fini(&ctx);
+
+	if (rc)
+		pr_warn("could not set the initial mode: %d\n", rc);
+	else
+		pr_info("initial mode set on the panel\n");
+}
+
 int pud_drm_register(struct drm_device *drm)
 {
+	struct pud *pud = drm_to_pud(drm);
 	int rc;
 
 	pr_info("%s\n", __func__);
@@ -605,6 +677,8 @@ int pud_drm_register(struct drm_device *drm)
 	};
 
 	drm_fbdev_generic_setup(drm, 0);
+	if (initial_mode)
+		pud_drm_set_initial_mode(pud);
 
 	return 0;
 }
