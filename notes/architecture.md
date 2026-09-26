@@ -3,7 +3,8 @@
 ## 定位
 
 `pud` 是一个 **USB 显示驱动**：一块 Raspberry Pi Pico（RP2350）通过 USB 接入 Linux 主机，
-把主机送过来的压缩图像流解码后刷到一块 SPI/I8080 TFT 上；反向还有一个（目前打桩的）触摸通道。
+把主机送过来的压缩图像流解码后刷到一块 SPI/I8080 TFT 上；反向还有一条触摸通道
+（EP4，设备主动推送）。
 
 主机侧（本仓库）负责：抓取显示内容 → 编码成压缩流 → 通过批量端点发送 → 注册成一个 DRM/fbdev 显示设备。
 
@@ -43,6 +44,8 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `input_only` | `0` | `insmod pud.ko input_only=1` 时**只注册触摸**，不注册 DRM/fbdev 节点。调触摸时用它：没有显示节点，桌面会话就不会把模块占住，`rmmod` 能立刻卸掉、反复加载。 |
+| `report_mode` | `touch` | 输入设备注册成哪种：`touch`（默认）或 `pointer`（`input.c` 的 `module_param(report_mode)`），差别见下面"输入设备（EP4）"一节。 |
+| `initial_mode` | `0` | 从 probe 直接提交一次固定 mode，让**没有 userspace** 时面板也点亮（`drm.c:pud_drm_set_initial_mode()`）。默认关是有原因的：它把驱动放进"没人在环里"的发送路径，只有在固件**丢弃不可信 header 而不是 stall EP1** 之后才安全 —— 那种 stall 曾把宿主控制器卡到板子都重启不干净（见 [build-and-test.md](build-and-test.md) 的"真机对比结论"）。固件 2026-09 起已满足该条件，`initial_mode=1` 已真机验证。 |
 
 ## 输入设备（EP4）
 

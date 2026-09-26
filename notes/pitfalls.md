@@ -120,8 +120,11 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 | `pud_flush()` EP0 | control OUT | `pud->ctrl_buf` | ✅ |
 | `pud_flush()` EP1（同步） | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
 | `pud_flush()` EP1（异步） | bulk OUT（`usb_submit_urb`） | `pud->encoder_buf`，`transfer_dma = encoder_dma` + `URB_NO_TRANSFER_DMA_MAP` | ✅ |
-| `input.c` REQ_EP4_IN | control OUT | `NULL, 0` → 条件 1 不成立，DMA 分支跳过 | ✅ |
-| `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kmalloc` | ✅ |
+| `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kzalloc` | ✅ |
+
+> 这张表里曾有一行 `REQ_EP4_IN`(0x05) 控制传输：那个轮询式取触摸的做法已经删掉
+> （现在是设备主动推送，见 [usb-protocol.md](usb-protocol.md) 的 EP4 一节），
+> 代码里只剩 `pud.h` 的宏定义。
 
 **容易误判的一处**：同步路径（`PUD_USB_ASYNC=0`）的 `pud_flush()` 里
 

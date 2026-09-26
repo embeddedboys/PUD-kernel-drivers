@@ -99,14 +99,15 @@ for (y = rect->y1; y < rect->y2; y += rows) { ... }
 **为什么是设备说了算**：同一个数字决定固件侧的 `EP1_RD_BUF_SIZE` 与帧槽大小
 （`PUD_MAX_TRANSFER`），而它按板子不同 —— RP2350 是 64 KB，RP2040 只有 256 KB SRAM
 所以是 32 KB。写死在驱动里的话，一份模块就不可能同时服务两种板子。
-真机日志（RP2350）：
+真机日志（RP2350，协议 v2）：
 
 ```
-pud 7-1:1.0: caps: proto 1, frame_max 65536, decoder 3 -> 21839 pixels per band
+pud 7-1:1.0: caps: proto 2, frame_max 65536, decoder 3 -> 21835 pixels per band
 ```
 
-65536 经 `min(USB_TRANS_MAX_SIZE=65535, …)` 得到 21839 px —— 与旧版编译期常量
-**逐字节相同**，所以这次改动在 RP2350 上不改变任何分带行为。协议细节见
+65536 经 `min(USB_TRANS_MAX_SIZE=65535, …)` 得到 **21835** px（`(65535 - 12 - 16) / 3`）。
+v1 的日志里这个数是 **21839**（`(65535 - 16) / 3`）—— 那时窗口矩形走 EP0 控制请求、
+12 B EP1 header 不占单次传输的预算，两者别混用。协议细节见
 [usb-protocol.md](usb-protocol.md)。
 
 每条带**独立编码、独立 `pud_flush()`**，坐标是真实带边界（`band.y2 - 1` 作为 `ye`）。
