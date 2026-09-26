@@ -5,9 +5,9 @@
 | Debian GNU/Linux 13 (trixie) | 6.12.47+rpt-rpi-2712 | Raspberry Pi 5 Model B |
 
 `kernel-6.12` is the upstream line and the branch the commands below check out.
-The deployment branch for this project's RK3588 board (vendor kernel 6.1.118,
-board running 6.1.172) is `rk-6.1.118`, which also carries `AGENTS.md` and
-`notes/`; both of its build modes are in
+The deployment branch for this project's RK3588 board is `rk-6.1.172` -- the
+board's kernel, the vendor source tree and its headers package are all 6.1.172
+-- and it carries `AGENTS.md` and `notes/`; both of its build modes are in
 [notes/build-and-test.md](./notes/build-and-test.md).
 
 install tools
@@ -93,5 +93,5 @@ Design notes and pitfall write-ups for maintainers live in [`notes/`](./notes/):
 - [Architecture and code map](./notes/architecture.md)
 - [USB protocol](./notes/usb-protocol.md) (authoritative field definitions)
 - [Display and refresh policy](./notes/display-and-refresh.md) (damage, QOI/RLE, band splitting)
-- [Build and test](./notes/build-and-test.md) (6.1.118 objtree / 6.1.172 headers)
+- [Build and test](./notes/build-and-test.md) (objtree and headers, both 6.1.172)
 - [Pitfalls](./notes/pitfalls.md) (DMA buffers, `transfer buffer is on stack`, vmalloc, swiotlb)

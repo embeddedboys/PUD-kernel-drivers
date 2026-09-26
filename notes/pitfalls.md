@@ -260,5 +260,5 @@ case DRM_FORMAT_RGB565:
 
 ### 4.3 修改内核源码树的诱惑
 
-构建 6.1.118 时需要用 `KERN_OBJ_DIR` 指向 objtree，而不是去 `KERN_DIR` 里补文件。
+构建 6.1.172 时需要用 `KERN_OBJ_DIR` 指向 objtree，而不是去 `KERN_DIR` 里补文件。
 **`KERN_DIR` 只读**。
