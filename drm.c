@@ -14,7 +14,11 @@
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <video/mipi_display.h>
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_fbdev_dma.h>
+#include <drm/drm_format_helper.h>
+#include <drm/drm_print.h>
 
 #include "pud.h"
 #include "encoder.h"
@@ -51,7 +55,7 @@ static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
 
 static int pud_buf_copy(void *dst, struct iosys_map *src,
                         struct drm_framebuffer *fb, struct drm_rect *clip,
-                        bool swap)
+                        struct drm_format_conv_state *fmtcnv)
 {
 	struct pud *pud = drm_to_pud(fb->dev);
 	// struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
@@ -76,8 +80,12 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 	case DRM_FORMAT_XRGB8888:
 		switch (pud->pixel_format) {
 		case DRM_FORMAT_RGB565:
+			/* The conversion scratch state comes from the shadow plane
+			 * state.  The old always-false `swap` flag it replaces is gone;
+			 * a byte-swapped panel would want drm_fb_xrgb8888_to_rgb565be()
+			 * here instead. */
 			drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip,
-			                          swap);
+			                          fmtcnv);
 			break;
 			// case DRM_FORMAT_RGB888:
 			//     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
@@ -134,12 +142,12 @@ static int pud_encode_band(struct pud *pud, unsigned int width,
 }
 
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
-                         struct drm_rect *rect)
+                         struct drm_rect *rect,
+                         struct drm_format_conv_state *fmtcnv)
 {
 	struct pud *pud = drm_to_pud(fb->dev);
 	struct drm_rect band;
 	unsigned int rows, y;
-	bool swap = false;
 	size_t encoded;
 	int ret;
 
@@ -161,7 +169,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 		width = band.x2 - band.x1;
 		height = band.y2 - band.y1;
 
-		ret = pud_buf_copy(pud->tx_buf, src, fb, &band, swap);
+		ret = pud_buf_copy(pud->tx_buf, src, fb, &band, fmtcnv);
 		if (ret)
 			return;
 
@@ -187,7 +195,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 			/* The frame did not reach the display: those pixels would stay
 			 * stale until the application happens to redraw them. Ask for a
 			 * full repaint on the next update instead. */
-			drm_dbg(fb->dev, "flush failed: %d\n", ret);
+			drm_dbg_driver(fb->dev, "flush failed: %d\n", ret);
 			pud->needs_full_refresh = true;
 			return;
 		}
@@ -224,9 +232,10 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 			pud->needs_full_refresh = false;
 			drm_rect_init(&rect, 0, 0, fb->width, fb->height);
 		}
-		drm_dbg(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n",
-		        fb->base.id, DRM_RECT_ARG(&rect));
-		pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect);
+		drm_dbg_driver(fb->dev, "Flushing [FB:%d] " DRM_RECT_FMT "\n",
+		               fb->base.id, DRM_RECT_ARG(&rect));
+		pud_fb_dirty(&shadow_plane_state->data[0], fb, &rect,
+		             &shadow_plane_state->fmtcnv_state);
 	}
 
 	drm_dev_exit(idx);
@@ -328,6 +337,25 @@ static const struct drm_connector_funcs pud_connector_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
+/*
+ * Framebuffers are created with the "dirty" variant, and the fbdev emulation
+ * leans on exactly that: it keeps a shadow buffer -- the thing that installs the
+ * deferred IO which turns a user-space mmap write into damage -- only for
+ * framebuffers whose funcs->dirty is set (drm_fbdev_dma_driver_fbdev_probe()
+ * picks its shadowed tail on fb->funcs->dirty).  Nothing scans this panel out:
+ * pixels reach it only because a commit goes through our flush path, so without
+ * a shadow a program that writes /dev/fb0 changes pixels nobody is told about.
+ * Measured on 6.1: a full-screen write produced not one byte on EP1 (usbmon),
+ * while the compositor and the console looked fine -- they flush through paths
+ * of their own.
+ *
+ * Cost of the shadow: one full-screen buffer (480x320x2 = 300 KB at the default
+ * mode) plus a copy per damage rectangle.
+ *
+ * (6.1 gated that shadow on mode_config.prefer_shadow_fbdev.  The flag is gone
+ * in 7.0, and prefer_shadow is a hint to userspace that the fbdev clients do
+ * not read.)
+ */
 static const struct drm_mode_config_funcs pud_drm_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create_with_dirty,
 	.atomic_check = drm_atomic_helper_check,
@@ -358,9 +386,19 @@ static const struct drm_driver pud_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops = &pud_drm_fops,
 	DRM_GEM_DMA_DRIVER_OPS_VMAP,
+	/*
+	 * Since 7.0 the fbdev emulation is split in two: drm_client_setup() only
+	 * registers the client, and the driver's own fbdev_probe callback is what
+	 * allocates the fbdev backing store.  drm_fb_helper_single_fb_probe()
+	 * refuses to run without it (WARN_ON + -EINVAL), so a driver that leaves
+	 * this out gets no /dev/fb0 and no console at all -- silently, because
+	 * drm_client_setup() itself succeeds.  This macro supplies the DMA-backed
+	 * one, and expands to .fbdev_probe = NULL when the kernel is built without
+	 * CONFIG_DRM_FBDEV_EMULATION.
+	 */
+	DRM_FBDEV_DMA_DRIVER_OPS,
 	.name = "pud-drm",
 	.desc = "pud DRM driver",
-	.date = "20250119",
 	.major = 1,
 	.minor = 0,
 };
@@ -501,28 +539,9 @@ static int pud_drm_dev_init_with_formats(
 	drm->mode_config.min_height = pud->mode.vdisplay;
 	drm->mode_config.max_height = pud->mode.vdisplay;
 
-	/*
-	 * The fbdev emulation needs a shadow buffer for this display to work at
-	 * all from user space.
-	 *
-	 * Nothing scans this panel out: pixels reach it only because a commit goes
-	 * through our flush path.  The emulation picks its buffer strategy from
-	 * drm_fbdev_use_shadow_fb() -- prefer_shadow_fbdev, prefer_shadow, or the
-	 * framebuffer's own dirty callback -- and without one of them it maps the
-	 * GEM buffer straight to user space, so a program that mmaps /dev/fb0 and
-	 * writes to it changes pixels that nobody is told about: measured, a
-	 * full-screen write produced not one byte on EP1 (usbmon), while the same
-	 * panel happily showed the compositor and the console.  With the flag set
-	 * the emulation keeps a shadow and installs deferred IO, which turns those
-	 * writes into damage like every other commit.
-	 *
-	 * Cost: one full-screen shadow (480x320x2 = 300 KB at the default mode)
-	 * and a copy per damage rectangle.
-	 */
-	drm->mode_config.prefer_shadow_fbdev = true;
 	pud->pixel_format = formats[0];
 
-	DRM_DEBUG_KMS("mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
+	drm_dbg_kms(drm, "mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
 
 	return 0;
 }
@@ -696,7 +715,9 @@ int pud_drm_register(struct drm_device *drm)
 		return -1;
 	};
 
-	drm_fbdev_generic_setup(drm, 0);
+	/* NULL picks the driver's preferred_depth, which is 16 here -- the same
+	 * thing the old drm_fbdev_generic_setup(drm, 0) asked for. */
+	drm_client_setup(drm, NULL);
 	if (initial_mode)
 		pud_drm_set_initial_mode(pud);
 

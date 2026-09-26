@@ -9,12 +9,13 @@ KERN_DIR ?= /lib/modules/$(shell uname -r)/build
 # in the source tree. Leave empty for an in-tree built kernel.
 KERN_OBJ_DIR ?=
 
-# users kernel dir
-# KERN_DIR=/home/user/linux
-
-# Target architecture and cross compiler, override as needed
-ARCH ?= arm64
-CROSS_COMPILE ?= aarch64-linux-gnu-
+# Target architecture and cross compiler.  The default is this host's own: the
+# default KERN_DIR above is the running kernel, and a build on the board itself
+# is native too.  A cross build has to say what it is:
+#
+#   make modules ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+ARCH ?= $(shell uname -m)
+CROSS_COMPILE ?=
 
 ifeq ($(KERN_OBJ_DIR),)
 KBUILD_O :=

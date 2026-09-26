@@ -164,7 +164,7 @@ struct pud_usb_bulk_context {
 
 static void pud_usb_bulk_timeout(struct timer_list *t)
 {
-	struct pud_usb_bulk_context *ctx = from_timer(ctx, t, timer);
+	struct pud_usb_bulk_context *ctx = timer_container_of(ctx, t, timer);
 
 	usb_sg_cancel(&ctx->sgr);
 }
@@ -193,7 +193,7 @@ static int pud_ep1_transfer(struct pud *pud, size_t len)
 	else
 		rc = len - PUD_EP1_HEADER_SIZE; /* callers count payload bytes */
 
-	destroy_timer_on_stack(&ctx.timer);
+	timer_destroy_on_stack(&ctx.timer);
 	return rc;
 }
 
@@ -668,6 +668,24 @@ static void pud_disconnect(struct usb_interface *intf)
 #endif
 }
 
+/*
+ * Quiesce the pipeline on the way down, which is what the DRM helpers expect a
+ * driver to do at shutdown time.  The disconnect path reaches the same place
+ * through pud_drm_unregister(); this one runs when the machine is powering off
+ * with the device still attached, where nothing guarantees a disconnect.
+ */
+static void pud_shutdown(struct usb_interface *intf)
+{
+#if PUD_DEF_DISP_BACKEND != PUD_DISP_BACKEND_FBDEV
+	struct pud *pud = usb_get_intfdata(intf);
+
+	if (!pud || pud->input_only)
+		return;
+
+	drm_atomic_helper_shutdown(&pud->drm);
+#endif
+}
+
 static struct usb_device_id pud_ids[] = {
 	{ USB_DEVICE(0x2E8A, 0x0001) },
 	{ /* KEEP THIS */ },
@@ -678,6 +696,7 @@ static struct usb_driver pud_drv = {
 	.name = DRV_NAME,
 	.probe = pud_probe,
 	.disconnect = pud_disconnect,
+	.shutdown = pud_shutdown,
 	.id_table = pud_ids,
 };
 module_usb_driver(pud_drv);
