@@ -14,7 +14,7 @@
 | --- | --- |
 | `usb.c` | 驱动主干：USB 厂商协议收发、能力查询（`pud_query_caps()`）、`pud_flush()`、probe/disconnect、DRM/fbdev 后端选择 |
 | `pud.h` | `struct pud` 主结构、端点/请求常量、后端选择开关 |
-| `drm.c` | DRM 后端：`drm_simple_display_pipe` 注册、damage 局部刷新、按设备解码器选编码器并分带 |
+| `drm.c` | DRM 后端：手工搭 plane/CRTC/encoder、damage 局部刷新、按设备解码器选编码器并分带 |
 | `fb.c` | fbdev 后端（`PUD_DISP_BACKEND_FBDEV`）：老式 framebuffer 接口 |
 | `encoder.c` / `encoder.h` | 编码层封装，对外暴露 `qoi_encode_rgb565()` / `rle_encode_rgb565()` |
 | `rgb565_qoi.c` / `rgb565_qoi.h` | RGB565 QOI 编解码库（来自 `rgb565-qoi/`，头文件加了 `__KERNEL__` 适配） |

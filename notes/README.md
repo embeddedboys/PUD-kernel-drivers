@@ -9,7 +9,7 @@
 | --- | --- |
 | [architecture.md](architecture.md) | 代码地图：各文件职责、数据流、fbdev/DRM 双后端 |
 | [usb-protocol.md](usb-protocol.md) | 与固件之间的 USB 厂商协议（**权威定义**，固件侧的镜像文档见 `Pico-USB-Display/notes/usb-protocol.md`） |
-| [display-and-refresh.md](display-and-refresh.md) | DRM simple-pipe 移植、damage 局部刷新、QOI 分带与整屏兜底 |
+| [display-and-refresh.md](display-and-refresh.md) | 手工搭 KMS 流水线（simple-KMS 弃用后的写法）、damage 局部刷新、QOI 分带与整屏兜底 |
 | [build-and-test.md](build-and-test.md) | 交叉编译（objtree 与 headers 两种模式，都是 6.1.172）与真机验证流程 |
 | [usbmon.md](usbmon.md) | 用 usbmon 看驱动实际发了什么：怎么抓、行怎么读、常用过滤、实测参照 |
 | [pitfalls.md](pitfalls.md) | 踩坑合集：DMA buffer 规则、`transfer buffer is on stack`、vmalloc、swiotlb、模块引用计数 |

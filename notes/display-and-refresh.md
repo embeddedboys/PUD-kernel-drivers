@@ -1,19 +1,61 @@
 # 显示与刷新策略（DRM 后端）
 
-## 为什么用 DRM simple-pipe
+## 流水线：自己搭 plane + CRTC + encoder
 
-驱动只需要"一块内存 → 一个固定分辨率面板"，没有 planes/CRTC 的复杂需求，
-所以用 `drm_simple_display_pipe` + shadow plane：
+驱动只需要"一块内存 → 一个固定分辨率面板"，没有复杂的 planes/CRTC 需求。历史上这是用
+`drm_simple_display_pipe` + shadow plane 写的，**现在改成自己搭**（内联版）：
 
 ```c
-static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
-    .mode_valid = pud_drm_pipe_mode_valid,
-    .enable     = pud_drm_pipe_enable,
-    .disable    = pud_drm_pipe_disable,
-    .update     = pud_drm_pipe_update,
-    DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
+static const struct drm_plane_helper_funcs pud_plane_helper_funcs = {
+    .begin_fb_access = drm_gem_begin_shadow_fb_access,
+    .end_fb_access   = drm_gem_end_shadow_fb_access,
+    .atomic_check    = pud_plane_atomic_check,
+    .atomic_update   = pud_plane_atomic_update,
 };
 ```
+
+### 为什么不用 simple-KMS helper
+
+上游 2026-03 的 `drm/simple-kms: Deprecate simple-kms helpers`（Thomas Zimmermann）把它们
+正式标记为废弃。理由分两层，都在那条提交里：
+
+- **提交信息**：这些 helper"已经被弃用好几年了"，多数驱动都迁走了，但**仍然时不时收到基于
+  它们写的新驱动**；标记 deprecated 就是为了止住这个趋势，同时给剩下的驱动留 TODO
+  （难度标 Easy，方便新贡献者上手）。
+- **它加进 `Documentation/gpu/todo.rst` 的 TODO**（技术理由）：`struct drm_simple_display_pipe`
+  和它的 helper"本意是简化驱动开发，结果只是**在 atomic modesetting 和驱动之间多加了一层
+  中间层**"。任务写得很具体：找到调 `drm_simple_display_pipe_init()` 的驱动，**把
+  `drm_simple_kms_helper.c` 里的 helper 内联进驱动**、按驱动自己的命名重写，
+  "such that no simple-KMS interfaces are required"；`drm_simple_encoder_init()` 同理。
+
+时间线：**≤ 7.2 还在**（7.2 里 `.c` 完好，只是文档被删、头文件顶上加了"不要在新代码里用"），
+**7.3-rc 起 `drm_simple_kms_helper.c` 没了**（头文件留一个周期）。所以想继续往新内核走的驱动
+都得内联 —— 我们做的就是这个。
+
+### 内联了什么：simple-pipe 内部 → 我们
+
+| simple-pipe 内部 | 我们的对应物（`drm.c`） |
+| --- | --- |
+| `drm_universal_plane_init()` + `drm_simple_kms_plane_funcs/helper_funcs` | `pud_drm_create_plane()` + `pud_plane_funcs` / `pud_plane_helper_funcs` |
+| plane `atomic_check`：`drm_atomic_helper_check_plane_state(…, DRM_PLANE_NO_SCALING, DRM_PLANE_NO_SCALING, false, false)` | `pud_plane_atomic_check()`（同参数：不缩放、不挪位、必须铺满） |
+| plane `atomic_update` → `pipe->funcs->update(pipe, old_state)` | `pud_plane_atomic_update()`（内容没变：damage 合并 → 分带 → `pud_fb_dirty()`） |
+| `DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS` | `drm_gem_begin/end_shadow_fb_access` + `drm_gem_reset/duplicate/destroy_shadow_plane_state` |
+| `drm_crtc_init_with_planes()` + `drm_simple_kms_crtc_funcs/helper_funcs` | `pud_drm_create_crtc()` + `pud_crtc_funcs` / `pud_crtc_helper_funcs` |
+| CRTC `atomic_check`：`drm_atomic_helper_check_crtc_primary_plane()` + `drm_atomic_add_affected_planes()` | `pud_crtc_atomic_check()`（逐字相同：CRTC 只有一个 plane，得让它进每一次提交） |
+| CRTC `atomic_enable/disable` → `pipe->funcs->enable/disable` | `pud_crtc_atomic_enable/disable`（仍然只打印一行） |
+| `drm_simple_encoder_init()`（`DRM_MODE_ENCODER_NONE`）+ `drm_connector_attach_encoder()` | `pud_drm_create_encoder()` + `pud_encoder_funcs` |
+
+一个顺序上的坑：**`drm->mode_config.funcs` 必须在创建 plane/CRTC 之前设好**，对象创建时会
+拿它校验。参考仓库 `linux-drm-tutorial` 的 `drm.c` 里留了一条 `RIP: drm_mode_validate_driver`
+的 oops 记录，就是设晚了。
+
+参考实现：同工作区的 `linux-drm-tutorial`（它的 `drm.c` 就是手工搭的最小 KMS 驱动，带完整虚拟
+链路，可以在 `make qemu` 的客户机里 `insmod` 跑起来看回调顺序）。
+
+移植验证（2026-09，7.0.0-34 客户机 + 真设备直通）：probe/caps/DRM 注册/fbcon 正常，
+写 `/dev/fb0` 64 KB → EP1 31 笔 / 95966 字节（与 simple-pipe 版几乎逐字节一致），
+`rmmod` 干净，`initial_mode=1` 也照常点亮（`pud_crtc_atomic_enable` → "initial mode set on
+the panel"）。
 
 支持的格式（`pud_drm_formats[]`）：
 
@@ -241,6 +283,9 @@ if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
 
 本驱动同时维护 `kernel-6.12`（上游）、`rk-6.1.172`（板子）和 `7.0.0-34-generic`（本机
 generic 内核，名字跟运行内核走）分支。
+
+**流水线不一样**：`kernel-6.12` 和 `rk-6.1.172` 用的还是 `drm_simple_display_pipe`
+（它们的内核里它还完好），本机这支是上面那套内联版 —— 往前走到 7.3+ 的就是后者。
 
 ### 6.12 与 6.1
 
