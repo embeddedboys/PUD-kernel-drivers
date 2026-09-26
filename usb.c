@@ -199,6 +199,17 @@ static int pud_ep1_transfer(struct pud *pud, size_t len)
 
 #endif /* PUD_USB_ASYNC */
 
+/*
+ * Bulk-transfer errors that mean the pipe is gone rather than halted: the
+ * interface is being unbound, the URB was killed, or the bus went down.  The
+ * EP4 resubmit path already treats these three as "the device is not there any
+ * more" rather than as a fault.
+ */
+static bool pud_pipe_is_gone(int rc)
+{
+	return rc == -ENOENT || rc == -ECONNRESET || rc == -ESHUTDOWN;
+}
+
 ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
                   const u8 jpeg_data[], size_t data_size)
 {
@@ -273,8 +284,14 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 	 * all -- measured: an oversized transfer leaves g_ep1_stat.oversize >= 1
 	 * and the host sees no error.  This stays for an older firmware, or a
 	 * controller-level stall, where without it the display never comes back.
+	 *
+	 * A pipe that is gone is not a stalled one: an unbind kills whatever flush
+	 * is in flight at that moment (measured 2026-09 on rmmod -- the console
+	 * cursor's own 480x22 band came back -ESHUTDOWN), and there is nothing left
+	 * to clear, so those statuses only produced an alarming log line for a
+	 * non-problem.
 	 */
-	if (rc < 0 && rc != -ETIMEDOUT) {
+	if (rc < 0 && rc != -ETIMEDOUT && !pud_pipe_is_gone(rc)) {
 		dev_warn_once(pud->dev,
 		              "EP1 transfer failed (%d), clearing the halt\n",
 		              rc);
