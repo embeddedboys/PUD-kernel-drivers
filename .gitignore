@@ -57,3 +57,6 @@ compile_commands.json
 
 # otherwise
 build/
+
+# python venv (tooling, e.g. virtme-ng)
+.venv/

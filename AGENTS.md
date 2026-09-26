@@ -95,6 +95,9 @@
 
 ## 真机测试
 
+- **在本机验证就用 `make qemu`**（[build-and-test.md](notes/build-and-test.md) C 节）：它在 QEMU
+  客户机里加载模块并留一个 root shell，出问题是客户机重启，不是工作站。**不要往本机内核
+  `insmod`**（原来那个干这个的 `make test` 目标已删）。
 - 部署与加载用仓里的 [`scripts/pud-load.sh`](scripts/pud-load.sh)（在**板子上**跑）：
   `load [模块参数...]` / `unload [--stop-gdm]` / `reload` / `status`。它会先校验
   `vermagic` 与 `uname -r` 一致（曾因旧 `.ko` 白折腾一整轮），并在卸载被桌面占住时

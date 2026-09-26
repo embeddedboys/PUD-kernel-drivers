@@ -25,6 +25,11 @@ sudo insmod pud.ko
 ```
 The default display backend is DRM.
 
+`make qemu` boots a throwaway VM (virtme-ng, installed in `.venv/`) with the
+module loaded and leaves a root shell there, so the driver can be exercised
+without ever loading it on this machine. `PARAMS=`, `CMD=` and `PASSTHROUGH=`
+tune it; see [notes/build-and-test.md](./notes/build-and-test.md) section C.
+
 ## Load / unload
 
 On the machine the panel is plugged into (`insmod`/`rmmod` only exist there), use

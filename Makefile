@@ -1,6 +1,5 @@
-
 # Target kernel build tree. Pass it on the command line for other kernels:
-#   make KERN_DIR=/path/to/linux KERN_OBJ_DIR=/path/to/objtree
+#   make modules KERN_DIR=/path/to/linux KERN_OBJ_DIR=/path/to/objtree
 KERN_DIR ?= /lib/modules/$(shell uname -r)/build
 
 # Out-of-tree build directory (objtree) of KERN_DIR. Only needed when the
@@ -82,12 +81,32 @@ ccflags-y += -DPUD_USB_ASYNC=$(PUD_USB_ASYNC)
 all: modules
 	$(MAKE) -C tests/
 
+tests:
+	$(MAKE) -C tests/
+
 modules: $(if $(filter $(NATIVE_KERN_DIR),$(KBUILD_KERN_DIR)),$(NATIVE_KERN_DIR))
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 	@$(MAKE) --no-print-directory compile_commands.json
 
 clean:
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules clean
+
+# ---------------------------------------------------------------------------
+# Throwaway VM around this repository (virtme-ng): boots a guest, loads pud.ko
+# in there and leaves a root shell.  Nothing is ever loaded on this machine.
+#
+#   make qemu                          guest kernel: the running one when a
+#                                      readable image exists, else the newest
+#                                      obtainable one -- the module is rebuilt
+#                                      for whichever it picks
+#   make qemu PARAMS=input_only=1      module parameters for insmod
+#   make qemu CMD='dmesg | grep pud'   run one command instead of the shell
+#   make qemu PASSTHROUGH=0            do not hand the USB panel to the guest
+#
+# Notes, limits and the manual route: notes/build-and-test.md, section C.
+# ---------------------------------------------------------------------------
+qemu:
+	scripts/qemu.sh
 
 # ---------------------------------------------------------------------------
 # One-time preparation of that writable copy.  Cached per kernel release;
@@ -124,9 +143,7 @@ $(NATIVE_KERN_DIR):
 	mv $@.tmp $@
 	@echo "  PREP    done, host tools now native for $(host_machine)"
 
-test: all
-	sudo rmmod $(MODULE_NAME).ko || true
-	sudo insmod $(MODULE_NAME).ko || true
+.PHONY: all tests modules clean qemu compile_commands.json
 
 # ---------------------------------------------------------------------------
 # Editor support.  kbuild records one .<obj>.cmd per object, and the kernel
@@ -136,7 +153,6 @@ test: all
 # ---------------------------------------------------------------------------
 GEN_COMPILE_COMMANDS := $(KBUILD_KERN_DIR)/scripts/clang-tools/gen_compile_commands.py
 
-.PHONY: compile_commands.json
 compile_commands.json:
 	@if [ -f "$(GEN_COMPILE_COMMANDS)" ]; then \
 		python3 "$(GEN_COMPILE_COMMANDS)" -d $(CURDIR) -o $(CURDIR)/$@ && \
