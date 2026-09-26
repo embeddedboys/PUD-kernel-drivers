@@ -500,6 +500,26 @@ static int pud_drm_dev_init_with_formats(
 	drm->mode_config.max_width = pud->mode.hdisplay;
 	drm->mode_config.min_height = pud->mode.vdisplay;
 	drm->mode_config.max_height = pud->mode.vdisplay;
+
+	/*
+	 * The fbdev emulation needs a shadow buffer for this display to work at
+	 * all from user space.
+	 *
+	 * Nothing scans this panel out: pixels reach it only because a commit goes
+	 * through our flush path.  The emulation picks its buffer strategy from
+	 * drm_fbdev_use_shadow_fb() -- prefer_shadow_fbdev, prefer_shadow, or the
+	 * framebuffer's own dirty callback -- and without one of them it maps the
+	 * GEM buffer straight to user space, so a program that mmaps /dev/fb0 and
+	 * writes to it changes pixels that nobody is told about: measured, a
+	 * full-screen write produced not one byte on EP1 (usbmon), while the same
+	 * panel happily showed the compositor and the console.  With the flag set
+	 * the emulation keeps a shadow and installs deferred IO, which turns those
+	 * writes into damage like every other commit.
+	 *
+	 * Cost: one full-screen shadow (480x320x2 = 300 KB at the default mode)
+	 * and a copy per damage rectangle.
+	 */
+	drm->mode_config.prefer_shadow_fbdev = true;
 	pud->pixel_format = formats[0];
 
 	DRM_DEBUG_KMS("mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
