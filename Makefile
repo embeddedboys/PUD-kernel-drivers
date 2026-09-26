@@ -78,6 +78,12 @@ MODULE_NAME:=pud
 PUD_USB_ASYNC ?= 0
 ccflags-y += -DPUD_USB_ASYNC=$(PUD_USB_ASYNC)
 
+# jpegenc.c is vendored byte-for-byte from upstream and defines its functions
+# without prototypes on purpose, so every build flags all of them -- GCC files
+# that under both -Wmissing-prototypes and -Wmissing-declarations.  Silence both
+# for that one file rather than touching the file.
+CFLAGS_jpegenc.o := -Wno-missing-prototypes -Wno-missing-declarations
+
 all: modules
 	$(MAKE) -C tests/
 
