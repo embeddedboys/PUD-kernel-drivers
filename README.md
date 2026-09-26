@@ -48,7 +48,7 @@ scripts/pud-load.sh load input_only=1          # touch only: rmmod always succee
 scripts/pud-load.sh load input_only=1 report_mode=pointer
 scripts/pud-load.sh load initial_mode=1        # light the panel with no userspace
 scripts/pud-load.sh status                     # parameters, nodes, input device, dmesg
-scripts/pud-load.sh unload [--stop-gdm]        # --stop-gdm: stop gdm, rmmod, start gdm
+scripts/pud-load.sh unload [--stop-dm]         # --stop-dm: stop the display manager, rmmod, start it again
 scripts/pud-load.sh reload input_only=1        # new .ko or different options
 ```
 

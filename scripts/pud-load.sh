@@ -5,9 +5,13 @@
 # into (the board itself -- insmod/rmmod only exist there).
 #
 #   scripts/pud-load.sh load   [module options...]   e.g. input_only=1
-#   scripts/pud-load.sh unload [--stop-gdm]
-#   scripts/pud-load.sh reload [--stop-gdm] [module options...]
+#   scripts/pud-load.sh unload [--stop-dm]
+#   scripts/pud-load.sh reload [--stop-dm] [module options...]
 #   scripts/pud-load.sh status
+#
+# --stop-dm stops the running display manager (gdm, lightdm, sddm, ...; found by
+# asking systemd, PUD_DM=<unit> overrides) around the unload.  Only needed when
+# a session holds the DRM node open; the older --stop-gdm spelling still works.
 #
 # Module options worth knowing (see notes/architecture.md):
 #   input_only=1          register only the touch input device, no DRM/fbdev
@@ -114,22 +118,31 @@ do_unload() {
     say "rmmod failed: the module is in use (refcnt $(refcnt))"
     holders
     say ""
-    say "A desktop session keeps /dev/dri/card* open (logind + gnome-shell)."
+    say "Something in userspace keeps /dev/dri/card* open (the session, or"
+    say "logind on its behalf)."
 
-    if [ "$stop_gdm" -eq 0 ]; then
-        say "Re-run with --stop-gdm to stop the session around the unload:"
-        say "  $0 unload --stop-gdm"
+    if [ "$stop_dm" -eq 0 ]; then
+        say "Re-run with --stop-dm to stop the display manager around the unload:"
+        say "  $0 unload --stop-dm"
         return 1
     fi
 
-    say "stopping gdm, unloading, restarting gdm ..."
-    systemctl stop gdm || say "warning: could not stop gdm"
+    local dm
+    if ! dm=$(dm_unit); then
+        say "no running display manager found to stop (tried gdm, lightdm, sddm, ...)"
+        say "log out of the session, then 'rmmod $MODULE' -- rebooting without"
+        say "loading the module is the last resort"
+        return 1
+    fi
+
+    say "stopping $dm, unloading, restarting $dm ..."
+    systemctl stop "$dm" || say "warning: could not stop $dm"
     local rc=0
     rmmod "$MODULE" || rc=$?
-    systemctl start gdm || say "warning: gdm did not restart -- run 'systemctl start gdm'"
+    systemctl start "$dm" || say "warning: $dm did not restart -- run 'systemctl start $dm'"
 
     if [ "$rc" -eq 0 ]; then
-        say "rmmod ok (gdm restarted)"
+        say "rmmod ok ($dm restarted)"
     else
         say "rmmod still failed; reboot without loading the module as a last resort"
     fi
@@ -184,12 +197,12 @@ case "$cmd" in
     load)   do_load "$@" ;;
     unload) do_unload "$@" ;;
     reload)
-        stop_gdm=""
-        if [ "${1:-}" = "--stop-gdm" ]; then
-            stop_gdm="--stop-gdm"; shift
-        fi
+        stop_dm=""
+        case "${1:-}" in
+            --stop-dm|--stop-gdm) stop_dm="$1"; shift ;;
+        esac
         if loaded; then
-            do_unload $stop_gdm || exit 1
+            do_unload $stop_dm || exit 1
         fi
         do_load "$@"
         ;;

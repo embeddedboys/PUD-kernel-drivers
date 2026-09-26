@@ -216,8 +216,8 @@ ssh <board>
   scripts/pud-load.sh load input_only=1        # 只触摸（rmmod 随时能卸，调触摸首选）
   scripts/pud-load.sh load input_only=1 report_mode=pointer
   scripts/pud-load.sh status                   # 参数 / 显示节点 / 输入设备 / dmesg
-  scripts/pud-load.sh unload                   # 被桌面占住时会告诉你重新用 --stop-gdm
-  scripts/pud-load.sh unload --stop-gdm        # 停 gdm → rmmod → 起 gdm
+  scripts/pud-load.sh unload                   # 被桌面占住时会告诉你重新用 --stop-dm
+  scripts/pud-load.sh unload --stop-dm         # 停显示管理器 → rmmod → 起回来
   scripts/pud-load.sh reload input_only=1      # 换参数/换 .ko 时用
 ```
 
@@ -228,8 +228,9 @@ ssh <board>
    实测：`vermagic 6.1.172 (running kernel: 6.1.172)` 通过，不匹配时给出修复提示）。
    顺手把 md5 也打出来，便于和 `scp` 的来源对账。
 2. **卸载被占用的处置**：先 `lsof /dev/dri/*` 列出占用者，再提示
-   `--stop-gdm`；带该参数时按"停 gdm → rmmod → 起 gdm"走一遍，即使 rmmod 失败也会把会话
-   拉回来（`rmmod ok (gdm restarted)` / gdm 之后仍是 `active`，实测）。
+   `--stop-dm`；带该参数时按"停显示管理器 → rmmod → 起回来"走一遍，即使 rmmod 失败也会把
+   会话拉回来。显示管理器是 `systemctl is-active` 问出来的（gdm/lightdm/sddm…，`PUD_DM=<unit>`
+   可以覆盖），所以换成别的桌面发行版也不用改脚本。
 
 `PUD_KO=/path/to/pud.ko` 可以指定别的模块（默认为仓库根的 `./pud.ko`），
 `MODULE=` 可以换模块名。工具只依赖 `kmod`/`lsof`/`systemctl`，不带任何本机路径。
@@ -281,7 +282,7 @@ ERROR: Module pud is in use
 
 | 谁占的 | 怎么认 | 怎么办 |
 | --- | --- | --- |
-| **用户态**会话持有 fd | `/proc/*/fd` 扫出进程（见下），`refcnt` 与"打开的 fd 数"对得上 | 停掉那个会话：`systemctl stop <unit>`（unit 名随板子不同；`pud-load.sh unload --stop-gdm` 只在那个会话**就是 gdm** 时才管用） |
+| **用户态**会话持有 fd | `/proc/*/fd` 扫出进程（见下），`refcnt` 与"打开的 fd 数"对得上 | 停掉那个会话：`pud-load.sh unload --stop-dm` 会自己找运行中的显示管理器停掉再卸；手动则是 `systemctl stop <unit>`（unit 名随发行版不同） |
 | **内核内部**（fbdev 模拟 + fbcon） | 扫 `/proc/*/fd` 为空但 `refcnt > 0`；`/sys/class/vtconsole/vtcon1/name` = `frame buffer device` 且 `bind=1` | **解绑 vtconsole**：`echo 0 > /sys/class/vtconsole/vtcon1/bind`（见 README 的"Useful commands"） |
 
 **先确认板上有没有 `lsof`**：本机就**没装**，`lsof … 2>/dev/null` 会给出"没人持有"的
@@ -314,7 +315,7 @@ sudo timeout 10 cat /dev/input/eventN | od -An -tx2   # 按屏幕就会出字节
 sudo rmmod pud                          # 立刻能卸
 ```
 
-没有 DRM 节点 → gnome-shell/logind 占不住模块 → 不用停 gdm、不用重启板子，
+没有 DRM 节点 → 桌面会话/logind 占不住模块 → 不用停显示管理器、不用重启，
 改一次 `input.c` 就能马上重编重载。默认（`input_only=0`）仍是显示 + 触摸一起注册，
 那时 `rmmod` 还是会被桌面会话挡住。
 

@@ -272,7 +272,7 @@ fbcon 不接管，dmesg 里只有一条 `WARNING`。移植时代码能编过、p
 ### 4.2 `rmmod` 失败、refcnt 只增不减
 
 `refcnt` 会被 gnome-shell 持有的 `/dev/dri/cardN` fd 抬高（曾涨到 32）。
-**可靠的重置手段是重启开发板**；`systemctl stop gdm`、解绑 vtconsole 不一定管用。
+**可靠的重置手段是重启开发板**；停显示管理器、解绑 vtconsole 不一定管用。
 
 ### 4.3 修改内核源码树的诱惑
 

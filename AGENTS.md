@@ -100,12 +100,13 @@
   客户机里加载模块并留一个 root shell，出问题是客户机重启，不是工作站。**不要往本机内核
   `insmod`**（原来那个干这个的 `make test` 目标已删）。
 - 部署与加载用仓里的 [`scripts/pud-load.sh`](scripts/pud-load.sh)（在**板子上**跑）：
-  `load [模块参数...]` / `unload [--stop-gdm]` / `reload` / `status`。它会先校验
+  `load [模块参数...]` / `unload [--stop-dm]` / `reload` / `status`。它会先校验
   `vermagic` 与 `uname -r` 一致（曾因旧 `.ko` 白折腾一整轮），并在卸载被桌面占住时
-  列出占用者、`--stop-gdm` 时按"停 gdm → rmmod → 起 gdm"走一遍。
+  列出占用者、`--stop-dm` 时按"停显示管理器（自动识别 gdm/lightdm/sddm…）→ rmmod →
+  起回来"走一遍。
 - **只调触摸就别加载显示**：`scripts/pud-load.sh load input_only=1` 只注册 input 设备，
-  没有 DRM/fbdev 节点，桌面会话占不住模块，`unload` 立刻成功 —— 反复试触摸不用停 gdm
-  （带显示加载时才需要 `unload --stop-gdm`）。看事件：
+  没有 DRM/fbdev 节点，桌面会话占不住模块，`unload` 立刻成功 —— 反复试触摸不用停显示管理器
+  （带显示加载时才需要 `unload --stop-dm`）。看事件：
   `grep -A5 pud /proc/bus/input/devices` 找 event 号，再
   `sudo timeout 10 cat /dev/input/eventN | od -An -tx2`，按屏幕会看到
   `0003 0000 xxxx`（ABS_X）/ `0003 0001 yyyy`（ABS_Y）/ `0001 014a 0001`（BTN_TOUCH）。
