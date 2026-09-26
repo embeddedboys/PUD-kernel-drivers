@@ -23,9 +23,13 @@
 #include <drm/drm_format_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_damage_helper.h>
-#include <drm/drm_gem_dma_helper.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_atomic.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_plane.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 
 /* Display backends select, fbdev is default */
@@ -227,7 +231,12 @@ struct pud {
 	unsigned int flush_fails;
 	unsigned long flush_last_fail;
 	struct drm_device drm;
-	struct drm_simple_display_pipe pipe;
+	/* The pipeline is built by hand out of these four: the simple-KMS helpers
+	 * that used to bundle plane+CRTC+encoder into one struct are deprecated
+	 * upstream and gone from kernels after 7.2.  See pud_drm_create_plane(). */
+	struct drm_plane plane;
+	struct drm_crtc crtc;
+	struct drm_encoder encoder;
 	struct drm_connector connector;
 	struct drm_display_mode mode;
 

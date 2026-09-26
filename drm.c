@@ -31,27 +31,63 @@ static inline struct pud *drm_to_pud(struct drm_device *drm)
 }
 
 static enum drm_mode_status
-pud_drm_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
-                        const struct drm_display_mode *mode)
+pud_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 {
-	struct pud *pud = drm_to_pud(pipe->crtc.dev);
+	struct pud *pud = drm_to_pud(crtc->dev);
 	int rc;
-	rc = drm_crtc_helper_mode_valid_fixed(&pipe->crtc, mode, &pud->mode);
+
+	rc = drm_crtc_helper_mode_valid_fixed(crtc, mode, &pud->mode);
 	pr_info("%s, rc: %d\n", __func__, rc);
 	return rc;
 }
 
-static void pud_drm_pipe_enable(struct drm_simple_display_pipe *pipe,
-                                struct drm_crtc_state *crtc_state,
-                                struct drm_plane_state *plane_state)
+static void pud_crtc_atomic_enable(struct drm_crtc *crtc,
+                                   struct drm_atomic_state *state)
 {
 	pr_info("%s\n", __func__);
 }
 
-static void pud_drm_pipe_disable(struct drm_simple_display_pipe *pipe)
+static void pud_crtc_atomic_disable(struct drm_crtc *crtc,
+                                    struct drm_atomic_state *state)
 {
 	pr_info("%s\n", __func__);
 }
+
+static int pud_crtc_atomic_check(struct drm_crtc *crtc,
+                                 struct drm_atomic_state *state)
+{
+	struct drm_crtc_state *crtc_state =
+	        drm_atomic_get_new_crtc_state(state, crtc);
+	int rc;
+
+	if (!crtc_state->enable)
+		goto out;
+
+	/* The CRTC has exactly one plane and no way of its own to know about it,
+	 * so that plane has to be part of every commit. */
+	rc = drm_atomic_helper_check_crtc_primary_plane(crtc_state);
+	if (rc)
+		return rc;
+
+out:
+	return drm_atomic_add_affected_planes(state, crtc);
+}
+
+static const struct drm_crtc_helper_funcs pud_crtc_helper_funcs = {
+	.mode_valid = pud_crtc_mode_valid,
+	.atomic_check = pud_crtc_atomic_check,
+	.atomic_enable = pud_crtc_atomic_enable,
+	.atomic_disable = pud_crtc_atomic_disable,
+};
+
+static const struct drm_crtc_funcs pud_crtc_funcs = {
+	.reset = drm_atomic_helper_crtc_reset,
+	.set_config = drm_atomic_helper_set_config,
+	.page_flip = drm_atomic_helper_page_flip,
+	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+	.destroy = drm_crtc_cleanup,
+};
 
 static int pud_buf_copy(void *dst, struct iosys_map *src,
                         struct drm_framebuffer *fb, struct drm_rect *clip,
@@ -202,29 +238,55 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 	}
 }
 
-static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
-                                struct drm_plane_state *old_state)
+static int pud_plane_atomic_check(struct drm_plane *plane,
+                                  struct drm_atomic_state *state)
 {
-	struct drm_plane_state *state = pipe->plane.state;
+	struct drm_plane_state *plane_state =
+	        drm_atomic_get_new_plane_state(state, plane);
+	struct drm_crtc_state *crtc_state = NULL;
+
+	if (plane_state->crtc)
+		crtc_state = drm_atomic_get_new_crtc_state(state,
+		                                           plane_state->crtc);
+
+	/* The plane always covers the whole panel: no scaling, no repositioning
+	 * -- the same limits the simple-KMS pipeline used to enforce on our
+	 * behalf. */
+	return drm_atomic_helper_check_plane_state(plane_state, crtc_state,
+	                                           DRM_PLANE_NO_SCALING,
+	                                           DRM_PLANE_NO_SCALING,
+	                                           false, false);
+}
+
+static void pud_plane_atomic_update(struct drm_plane *plane,
+                                    struct drm_atomic_state *state)
+{
+	struct drm_plane_state *plane_state = plane->state;
+	struct drm_plane_state *old_plane_state =
+	        drm_atomic_get_old_plane_state(state, plane);
+	struct drm_crtc_state *new_crtc_state;
 	struct drm_shadow_plane_state *shadow_plane_state =
-	        to_drm_shadow_plane_state(state);
-	struct drm_framebuffer *fb = state->fb;
+	        to_drm_shadow_plane_state(plane_state);
+	struct drm_framebuffer *fb = plane_state->fb;
 	struct drm_rect rect;
 	struct pud *pud;
 	int idx;
 
-	if (!pipe->crtc.state->active)
+	/* A plane being turned off has no framebuffer and nothing to send. */
+	if (!fb || !plane_state->crtc)
 		return;
 
-	if (WARN_ON(!fb))
+	new_crtc_state = drm_atomic_get_new_crtc_state(state, plane_state->crtc);
+	if (!new_crtc_state->active)
 		return;
 
-	pud = drm_to_pud(fb->dev);
+	pud = drm_to_pud(plane->dev);
 
-	if (!drm_dev_enter(fb->dev, &idx))
+	if (!drm_dev_enter(plane->dev, &idx))
 		return;
 
-	if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
+	if (drm_atomic_helper_damage_merged(old_plane_state, plane_state,
+	                                    &rect) ||
 	    pud->needs_full_refresh) {
 		if (pud->needs_full_refresh) {
 			/* A previous flush was lost; repaint everything so no stale
@@ -241,12 +303,24 @@ static void pud_drm_pipe_update(struct drm_simple_display_pipe *pipe,
 	drm_dev_exit(idx);
 }
 
-static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
-	.mode_valid = pud_drm_pipe_mode_valid,
-	.enable = pud_drm_pipe_enable,
-	.disable = pud_drm_pipe_disable,
-	.update = pud_drm_pipe_update,
-	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
+static const struct drm_plane_helper_funcs pud_plane_helper_funcs = {
+	.begin_fb_access = drm_gem_begin_shadow_fb_access,
+	.end_fb_access = drm_gem_end_shadow_fb_access,
+	.atomic_check = pud_plane_atomic_check,
+	.atomic_update = pud_plane_atomic_update,
+};
+
+static const struct drm_plane_funcs pud_plane_funcs = {
+	.reset = drm_gem_reset_shadow_plane,
+	.atomic_duplicate_state = drm_gem_duplicate_shadow_plane_state,
+	.atomic_destroy_state = drm_gem_destroy_shadow_plane_state,
+	.update_plane = drm_atomic_helper_update_plane,
+	.disable_plane = drm_atomic_helper_disable_plane,
+	.destroy = drm_plane_cleanup,
+};
+
+static const struct drm_encoder_funcs pud_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
 };
 
 static int pud_connector_get_modes(struct drm_connector *connector)
@@ -367,6 +441,13 @@ static const uint32_t pud_drm_formats[] = {
 	DRM_FORMAT_XRGB8888, /* DRM driver framebuffer format */
 };
 
+/* Linear only: the panel is fed out of system memory, and the shadow plane the
+ * compositor hands us is linear anyway. */
+static const uint64_t pud_format_modifiers[] = {
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID,
+};
+
 /*
  * The mode is built at probe time from the panel parameters the device reports
  * (PUD_CMD_GET_CAPS), so it is no longer a compile-time constant: the same
@@ -403,13 +484,66 @@ static const struct drm_driver pud_drm_driver = {
 	.minor = 0,
 };
 
+/*
+ * The display pipeline: one primary plane, one CRTC, one encoder, built here
+ * instead of with the simple-KMS helpers.  Those bundled exactly these three
+ * objects; upstream deprecated them (drm/simple-kms: Deprecate simple-kms
+ * helpers, 2026-03) and removed the implementation after 7.2, so a driver that
+ * wants to keep building has to inline what it used.  See
+ * notes/display-and-refresh.md for the mapping.
+ */
+static int pud_drm_create_plane(struct pud *pud, const uint32_t *formats,
+                                unsigned int formats_count)
+{
+	int rc;
+
+	rc = drm_universal_plane_init(&pud->drm, &pud->plane, 0,
+	                              &pud_plane_funcs, formats, formats_count,
+	                              pud_format_modifiers,
+	                              DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (rc)
+		return rc;
+
+	drm_plane_helper_add(&pud->plane, &pud_plane_helper_funcs);
+	drm_plane_enable_fb_damage_clips(&pud->plane);
+
+	return 0;
+}
+
+static int pud_drm_create_crtc(struct pud *pud)
+{
+	int rc;
+
+	rc = drm_crtc_init_with_planes(&pud->drm, &pud->crtc, &pud->plane, NULL,
+	                               &pud_crtc_funcs, NULL);
+	if (rc)
+		return rc;
+
+	drm_crtc_helper_add(&pud->crtc, &pud_crtc_helper_funcs);
+
+	return 0;
+}
+
+static int pud_drm_create_encoder(struct pud *pud)
+{
+	struct drm_encoder *encoder = &pud->encoder;
+	int rc;
+
+	/* The encoder holds the plane+CRTC pair and does nothing else: whatever
+	 * the device is, the compositor only ever needs the one output. */
+	encoder->possible_crtcs = drm_crtc_mask(&pud->crtc);
+	rc = drm_encoder_init(&pud->drm, encoder, &pud_encoder_funcs,
+	                      DRM_MODE_ENCODER_NONE, NULL);
+	if (rc)
+		return rc;
+
+	return drm_connector_attach_encoder(&pud->connector, encoder);
+}
+
 static int pud_drm_dev_init_with_formats(
-        struct pud *pud, const struct drm_simple_display_pipe_funcs *funcs,
-        const uint32_t *formats, unsigned int formats_count,
+        struct pud *pud, const uint32_t *formats, unsigned int formats_count,
         const struct drm_display_mode *mode, size_t tx_buf_size)
 {
-	static const uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR,
-		                              DRM_FORMAT_MOD_INVALID };
 	struct drm_device *drm = &pud->drm;
 	size_t enc_size;
 	int rc;
@@ -523,21 +657,31 @@ static int pud_drm_dev_init_with_formats(
 	if (rc)
 		pr_warn("failed to attach the panel EDID: %d\n", rc);
 
-	rc = drm_simple_display_pipe_init(drm, &pud->pipe, funcs, formats,
-	                                  formats_count, modifiers,
-	                                  &pud->connector);
-	if (rc) {
-		pr_err("failed to init pipe\n");
-		return rc;
-	}
-
-	drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
-
+	/* The mode config has to know how to validate modes and commits before the
+	 * pipeline objects exist: they are checked against it as they are set up. */
 	drm->mode_config.funcs = &pud_drm_mode_config_funcs;
 	drm->mode_config.min_width = pud->mode.hdisplay;
 	drm->mode_config.max_width = pud->mode.hdisplay;
 	drm->mode_config.min_height = pud->mode.vdisplay;
 	drm->mode_config.max_height = pud->mode.vdisplay;
+
+	rc = pud_drm_create_plane(pud, formats, formats_count);
+	if (rc) {
+		pr_err("failed to init plane\n");
+		return rc;
+	}
+
+	rc = pud_drm_create_crtc(pud);
+	if (rc) {
+		pr_err("failed to init crtc\n");
+		return rc;
+	}
+
+	rc = pud_drm_create_encoder(pud);
+	if (rc) {
+		pr_err("failed to init encoder\n");
+		return rc;
+	}
 
 	pud->pixel_format = formats[0];
 
@@ -547,7 +691,6 @@ static int pud_drm_dev_init_with_formats(
 }
 
 static int pud_drm_dev_init(struct pud *pud,
-                            const struct drm_simple_display_pipe_funcs *funcs,
                             const struct drm_display_mode *mode)
 {
 	ssize_t bufsize = mode->vdisplay * mode->hdisplay * sizeof(u16);
@@ -556,7 +699,7 @@ static int pud_drm_dev_init(struct pud *pud,
 
 	pr_info("%s\n", __func__);
 
-	return pud_drm_dev_init_with_formats(pud, funcs, pud_drm_formats,
+	return pud_drm_dev_init_with_formats(pud, pud_drm_formats,
 	                                     ARRAY_SIZE(pud_drm_formats), mode,
 	                                     bufsize);
 }
@@ -611,7 +754,7 @@ struct drm_device *pud_drm_alloc(struct device *dev,
 	dev->dma_mask = &pud->dma_mask;
 	dev->coherent_dma_mask = DMA_BIT_MASK(32);
 
-	rc = pud_drm_dev_init(pud, &pud_display_pipe_funcs, &mode);
+	rc = pud_drm_dev_init(pud, &mode);
 	if (rc) {
 		pr_err("failed to init drm dev\n");
 		pud_drm_release_buffers(pud);
@@ -677,7 +820,7 @@ static void pud_drm_set_initial_mode(struct pud *pud)
 	struct drm_modeset_acquire_ctx ctx;
 	struct drm_connector *connectors[1] = { &pud->connector };
 	struct drm_mode_set set = {
-		.crtc = &pud->pipe.crtc,
+		.crtc = &pud->crtc,
 		.mode = &pud->mode,
 		.fb = drm->fb_helper ? drm->fb_helper->fb : NULL,
 		.connectors = connectors,
