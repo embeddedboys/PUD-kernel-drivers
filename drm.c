@@ -642,7 +642,7 @@ static bool initial_mode;
 module_param(initial_mode, bool, 0444);
 MODULE_PARM_DESC(
         initial_mode,
-        "set a mode from probe so the panel lights up without userspace");
+        "set a mode from probe so the panel lights up without userspace; teardown after using it hangs (see notes/pitfalls.md 4.5)");
 
 /*
  * Put a mode on the panel at probe time.
@@ -663,6 +663,13 @@ MODULE_PARM_DESC(
  * works whether or not anybody else ever commits anything.  Note that
  * drm_fb_helper_restore_fbdev_mode_unlocked() cannot be used for it -- it gives
  * up when a userspace DRM master exists (drm_fb_helper_is_bound()).
+ *
+ * KNOWN ISSUE -- teardown after a commit from here hangs (measured 3/3 on 7.0,
+ * QEMU with the real device passed through): `rmmod` prints "pud_drm_unregister"
+ * and stops, wedging the machine; the stall is inside drm_dev_unplug(), before
+ * the fbcon switch back.  The same driver without initial_mode unloads cleanly.
+ * 6.1 was only ever checked for "the panel lights up", so this is probably not
+ * 7.0-specific.  See notes/pitfalls.md 4.5.
  */
 static void pud_drm_set_initial_mode(struct pud *pud)
 {

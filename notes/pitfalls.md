@@ -292,3 +292,22 @@ insmod: ERROR: could not insert module pud.ko: Unknown symbol in module
 `/lib/modules/$(uname -r)` 下用 `modprobe pud`，由 `modules.dep` 解决依赖。
 只看 `insmod` 的错误看不出是哪个符号，`dmesg` 里才有：
 `pud: Unknown symbol drm_fbdev_dma_driver_fbdev_probe (err -2)`。
+
+### 4.5 `initial_mode=1` 之后卸载卡死（**未定位**）
+
+`insmod pud.ko initial_mode=1` 之后再卸载，会卡在 `pud_drm_unregister` 里：
+
+```
+[    4.719804] pud-drm: pud_drm_unregister
+<没有下文，`timeout 15 rmmod pud` 之后客户机整个僵住>
+```
+
+对比：**同样的路径不带 `initial_mode`（默认）时卸载是干净的**
+（`pud_drm_unregister` → `Console: switching to colour *CGA` → `pud_drm_pipe_disable`）。
+所以卡的不是 `drm_atomic_helper_shutdown()` 那一段（那会先打 `pipe_disable`），而是它之前的
+`drm_dev_unplug()` —— 停顿点连 fbcon 的 CGA 回切都没到。
+
+现场（2026-09）：7.0 的 QEMU 客户机 + 真设备直通，3/3 复现。**6.1 板上只验证过
+"面板会被点亮"，没验证过卸载**，所以未必是 7.0 独有的问题。`initial_mode` 默认关闭
+（它是给"没有任何用户态来提交模式"的场景用的，见 drm.c 里 `pud_drm_set_initial_mode()`
+的注释），常规用法不受影响 —— 但**用完之后别留着它卸载模块/关机**。
