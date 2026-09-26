@@ -106,11 +106,18 @@
   `sudo timeout 10 cat /dev/input/eventN | od -An -tx2`，按屏幕会看到
   `0003 0000 xxxx`（ABS_X）/ `0003 0001 yyyy`（ABS_Y）/ `0001 014a 0001`（BTN_TOUCH）。
   默认（不带参数）还是显示 + 触摸一起注册。
+- **没人开桌面会话时想让面板自己亮**：`scripts/pud-load.sh load initial_mode=1` 会从 probe
+  直接提交一次固定 mode（默认关：它把驱动放进"没人在环里"的发送路径，前置条件与理由见
+  [`notes/architecture.md`](notes/architecture.md) 的"运行期参数"）。
 - **fbdev 编号不固定**：PUD 可能是 `fb0` 也可能是 `fb1`。用
   `cat /sys/class/graphics/fb*/name` 找 `pud-drmdrmfb`，不要写死。
 - 要看固件内部状态（解码计数等）走 CMSIS-DAP：OpenOCD 跑在 **Windows 宿主机**，
   WSL 侧用 `gdb-multiarch -q -nh` 连 `localhost:3333`。
   只读检查后要 `monitor resume`，**别用 `monitor reset run`**（会清状态）。
+  **原生 Linux 开发机不需要这一层**（2026-09 实测）：调试器直接可见时 OpenOCD 就跑在本机，
+  gdb 连 `localhost:3333` 即可，命令完全相同。注意 openocd 0.12 把两个核当 **SMP 组**，
+  `resume` 前必须先把两个核都 `halt`（否则 resume 失败并把核留在停机状态）；细节见
+  固件仓 `Pico-USB-Display/notes/debugging.md` 的"halt/resume 的坑"。
 - **不加载驱动也能测全部功能**：用固件仓的 `scripts/`（用户空间 pyusb）。
 
 ## 板子上的工作方式（省时间，都是踩过的坑）

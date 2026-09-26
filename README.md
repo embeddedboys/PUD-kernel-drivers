@@ -4,6 +4,12 @@
 | --- | --- | --- |
 | Debian GNU/Linux 13 (trixie) | 6.12.47+rpt-rpi-2712 | Raspberry Pi 5 Model B |
 
+`kernel-6.12` is the upstream line and the branch the commands below check out.
+The deployment branch for this project's RK3588 board (vendor kernel 6.1.118,
+board running 6.1.172) is `rk-6.1.118`, which also carries `AGENTS.md` and
+`notes/`; both of its build modes are in
+[notes/build-and-test.md](./notes/build-and-test.md).
+
 install tools
 ```bash
 sudo apt install git make gcc vim -y
@@ -30,6 +36,7 @@ and handles a desktop holding the DRM node when unloading.
 scripts/pud-load.sh load                       # display + touch
 scripts/pud-load.sh load input_only=1          # touch only: rmmod always succeeds
 scripts/pud-load.sh load input_only=1 report_mode=pointer
+scripts/pud-load.sh load initial_mode=1        # light the panel with no userspace
 scripts/pud-load.sh status                     # parameters, nodes, input device, dmesg
 scripts/pud-load.sh unload [--stop-gdm]        # --stop-gdm: stop gdm, rmmod, start gdm
 scripts/pud-load.sh reload input_only=1        # new .ko or different options

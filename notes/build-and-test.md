@@ -261,6 +261,11 @@ for f in /sys/class/graphics/fb*; do echo "$f: $(cat $f/name)"; done
     -ex "file Pico-USB-Display/build-pico2/pico-usb-display.elf" \
     -ex "target extended-remote localhost:3333"
   ```
+- **原生 Linux 开发机不需要 Windows/WSL 这一层**（2026-09 实测）：调试器直接挂在开发机上时，
+  OpenOCD 就跑在本机，gdb 连 `localhost:3333` 的命令与上面完全相同。此时注意 openocd 0.12
+  把 `rp2350.cm0` / `rp2350.cm1` 当成**一个 SMP 组**：只 halt 一个核再 `resume` 会失败，
+  并把核留在停机状态（板子看起来卡死）—— 先把两个核都 `halt`，再 `resume` 一次带上整组。
+  详见固件仓 `Pico-USB-Display/notes/debugging.md` 的"halt/resume 的坑"。
 - `/tmp` 在 WSL 里**每次调用都是独立的**，不要把中间产物放那儿再跨调用读。
 
 详见 `Pico-USB-Display/notes/debugging.md`。
