@@ -22,7 +22,24 @@ static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
 | `DRM_FORMAT_RGB565` | 面板原生格式，直接 `drm_fb_memcpy` 拷出 |
 | `DRM_FORMAT_XRGB8888` | 合成器常用格式，用 `drm_fb_xrgb8888_to_rgb565` 转换 |
 
-默认模式是 `DRM_MODE_INIT(60, 480, 320, 85, 55)`。fbdev 模拟通过 `drm_fbdev_generic_setup(drm, 0)` 建立。
+默认模式由**设备上报的面板参数**生成（`pud_mode_init()` →
+`DRM_MODE_INIT(60, xres, yres, width_mm ?: 85, height_mm ?: 55)`），拿不到能力报告时退回
+`pud_default_display`（480×320、74×49 mm）—— 所以 `85/55` 只是 mm 为 0 时的兜底，实测
+（设备报 70×40 mm）生成的是 480×320 / **70×40**。fbdev 模拟通过
+`drm_fbdev_generic_setup(drm, 0)` 建立。
+
+> **fbdev 模拟必须有 shadow buffer**，否则用户态写 `/dev/fb0` 会被**静默忽略**。这块屏不是
+> 扫描输出：像素只有靠一次提交走我们的 flush 路径才能出去。而 fbdev 模拟挑缓冲策略看的是
+> `drm_fbdev_use_shadow_fb()`（`prefer_shadow_fbdev` / `prefer_shadow` / `fb->funcs->dirty`
+> 三者之一）—— 一个都没有时它把 GEM buffer 直接映射给用户态，程序 mmap 写完**没人知道**。
+>
+> 实测（2026-09）：没设这个标志时往 `/dev/fb0` 画整屏，usbmon 里 EP1 **一笔都没有**
+> （同一窗口里 fbcon 的光标和合成器的刷新都正常在发 —— 它们分别走 fb 层的显式标脏和 DRM，
+> 所以控制台与桌面看不出问题，这个坑只在 fbdev 用户态程序上暴露）；
+> `drm.c` 里设上 `drm->mode_config.prefer_shadow_fbdev = true` 之后，**同一个脚本变成
+> 4368 笔 / 2.3 MB**（脚本按行写，所以一行一次更新）。
+>
+> 代价：一块整屏 shadow（480×320×2 = 300 KB）+ 每次 damage 一次拷贝。
 
 > `pud_drm_pipe_enable()` 只打印一行日志，**不做任何全屏刷新** —— 首帧画面依靠第一次
 > atomic commit 走正常 damage 路径完成。改这里时要意识到 `enable` 之后屏幕是黑的，
@@ -112,8 +129,9 @@ v1 的日志里这个数是 **21839**（`(65535 - 16) / 3`）—— 那时窗口
 
 每条带**独立编码、独立 `pud_flush()`**，坐标是真实带边界（`band.y2 - 1` 作为 `ye`）。
 
-> **JPEG 路径只整屏用。** fbdev 后端（`pud_bmp_blit` / fb deferred-IO）发的是整屏 JPEG，
-> 坐标固定 `(0,0)`；DRM 后端一律 QOI 分带。不要给 JPEG 帧传非零 `x`：固件侧
+> **JPEG 路径只整屏用。** fbdev 后端（`fb.c` 的 `pud_fb_deferred_io()` →
+> `jpeg_encode_rgb565()`）发的是整屏 JPEG，坐标固定 `(0,0)`；DRM 后端按设备上报的
+> `decoder_type` 选编码器（QOI 或 RLE）分带。不要给 JPEG 帧传非零 `x`：固件侧
 > JPEGDEC 在 `x != 0` 时 `iWidthUsed` 会算出负值，`xe` 被填成子图内坐标、`len` 变成巨大的
 > 无符号数，一次这样的 flush 就把 `decoder_task` 卡死、帧槽永不释放（真机复现：
 > `submitted/drawn = 2/0`，主机持续超时）。固件仓 `notes/decoders.md` 有完整数据。
@@ -165,6 +183,12 @@ drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
 同步是 `usb_sg_wait()`，异步是 `wait_for_completion_timeout()` + `usb_kill_urb()`。
 一旦失败，**这一帧的 damage 就永远丢了** —— 那一块像素会一直保持旧内容，
 直到应用恰好重绘它（典型表现就是"残影"）。
+
+失败还会**限速**（`usb.c`）：连续失败到 `PUD_FLUSH_FAIL_MAX`（= 3）次之后，最多每秒再试
+一次（`flush_fails` / `flush_last_fail`）。理由是一次失败的传输会占住 USB worker 整个
+看门狗周期，设备不在时 damage 来得多快就打得多快；每秒一次仍然能在设备回来时自动接上。
+失败本身打 `EP1 transfer failed (…)`（`dev_warn_ratelimited`），第 3 次补一条 `dev_err`
+—— 所以**dmesg 干净 + 有 EP1 流量**（见 [usbmon.md](usbmon.md)）才等于"真的没出错"。
 
 所以加了一层兜底：
 

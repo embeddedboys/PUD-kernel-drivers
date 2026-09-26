@@ -19,9 +19,9 @@
 | `encoder.c` / `encoder.h` | 编码层封装，对外暴露 `qoi_encode_rgb565()` / `rle_encode_rgb565()` |
 | `rgb565_qoi.c` / `rgb565_qoi.h` | RGB565 QOI 编解码库（来自 `rgb565-qoi/`，头文件加了 `__KERNEL__` 适配） |
 | `rgb565_rle.c` / `rgb565_rle.h` | RGB565 RLE 编解码库（来自 `rgb565-rle/`，同样只改 include 适配） |
-| `jpegenc.c` / `jpegenc.h` | 早期 JPEG 编码路径，现在仅在 fbdev 后端的 `pud_bmp_blit()` 里还被用到 |
+| `jpegenc.c` / `jpegenc.h` | 早期 JPEG 编码路径，现在只被 fbdev 后端用到（`fb.c` 的 `pud_fb_deferred_io()` → `jpeg_encode_rgb565()`，整屏、坐标固定 `(0,0)`） |
 | `input.c` | 触摸输入：EP4 中断 URB（设备主动推送）+ `input_dev` 注册 |
-| `dma_gem_dma_helper.c` | GEM DMA helper（DRM 后端用） |
+| `dma_gem_dma_helper.c` | 内核 `drm_gem_dma_helper` 的一份 vendored 副本：**不在 Makefile 里、没被编译**（DRM 后端用的是内核自带的 `drm_gem_dma_*`），留着只作参考 —— 改它不会有任何效果 |
 
 ## 构建组成
 
@@ -122,9 +122,9 @@ EDID 只以整厘米记尺寸，内核分辨率是整数量/mm，两个粒度要
 
 **已验证（2026-09，真机）**：
 
-- 新固件（28 B 应答）→
+- 新固件（32 B 应答）→
   `caps: proto 2, frame_max 65536, decoder 3 -> 21835 pixels per band` +
-  `panel: 480x320, rotation 1, 16 bpp, 50000 kHz, interface 0, touch poll 10 ms`；
+  `panel: 480x320, rotation 1, 16 bpp, 50000 kHz, interface 0, 70x40 mm, touch yes`；
   默认加载路径 `pud-drm: mode: 480x320`、`/sys/class/drm/card3-USB-1` = `connected enabled`、
   modes = `480x320`（**由设备上报的 xres/yres 生成**）；
 - 老固件（16 B 应答，烧写前那一版）→ `(old firmware: no panel parameters)` + 默认值，

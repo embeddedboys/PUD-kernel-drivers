@@ -213,12 +213,34 @@ cat /sys/module/pud/refcnt
 ERROR: Module pud is in use
 ```
 
-因为 gnome-shell（Wayland 合成器）持有 `/dev/dri/cardN` 的 fd。`refcnt` 会随着
-分辨率/热插拔事件累积（曾观察到涨到 32）。**可靠的重置手段是重启开发板**。
+因为合成器（gnome-shell 那类 Wayland 合成器）持有 `/dev/dri/cardN` 的 fd。`refcnt` 会随着
+分辨率/热插拔事件累积（曾观察到涨到 32）。
 
-次选手段（不一定管用）：
-- `systemctl stop gdm` 之类停掉会话，再 `rmmod`
-- 解绑 vtconsole：`echo 0 > /sys/class/vtconsole/vtcon1/bind`
+**先搞清楚是谁占的**，两种情形处理方式完全不同（2026-09 实测）：
+
+| 谁占的 | 怎么认 | 怎么办 |
+| --- | --- | --- |
+| **用户态**会话持有 fd | `/proc/*/fd` 扫出进程（见下），`refcnt` 与"打开的 fd 数"对得上 | 停掉那个会话：`systemctl stop <unit>`（unit 名随板子不同；`pud-load.sh unload --stop-gdm` 只在那个会话**就是 gdm** 时才管用） |
+| **内核内部**（fbdev 模拟 + fbcon） | 扫 `/proc/*/fd` 为空但 `refcnt > 0`；`/sys/class/vtconsole/vtcon1/name` = `frame buffer device` 且 `bind=1` | **解绑 vtconsole**：`echo 0 > /sys/class/vtconsole/vtcon1/bind`（见 README 的"Useful commands"） |
+
+**先确认板上有没有 `lsof`**：本机就**没装**，`lsof … 2>/dev/null` 会给出"没人持有"的
+**假结论**（实测踩过）。用这个不依赖工具的扫法：
+
+```bash
+for f in /dev/dri/card* /dev/fb*; do
+  for p in /proc/[0-9]*; do
+    for fd in $p/fd/*; do
+      [ "$(readlink $fd 2>/dev/null)" = "$f" ] && \
+        echo "$f <- pid $(basename $p) $(cat $p/comm 2>/dev/null)"
+    done
+  done
+done
+```
+
+实测（2026-09）：`refcnt` 是 5，扫出来正好是一个全屏合成器会话持有的若干 card3 fd 加
+`systemd-logind` 的一个 —— **fbcon 不占 fd、也不拦 `rmmod`**（`/dev/fb0` 一个进程都没打开）。
+
+**可靠的重置手段仍然是重启开发板。**
 
 ### 只调触摸：`input_only=1`
 

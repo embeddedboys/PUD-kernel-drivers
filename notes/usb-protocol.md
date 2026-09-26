@@ -54,9 +54,11 @@
   驱动不用改：`usb_fill_int_urb()` 用的是描述符里的 `bInterval`。
 - 驱动侧实现（`input.c`）：`pud_input_setup()` 只提交一次 URB，回调里除
   `-ENOENT`/`-ECONNRESET`/`-ESHUTDOWN` 外都重新提交；`version != 1` 的报告不解析
-  （0 = 这版固件没有触摸），长度不足 8 字节的短报告只告警。上报用
-  `BTN_TOUCH`/`BTN_LEFT` + `ABS_X`/`ABS_Y`（单点，不走 MT slot），并置
-  `INPUT_PROP_DIRECT` 让上层知道这是触摸屏。
+  （0 = 这版固件没有触摸），长度不足 8 字节的短报告只告警。上报按 `report_mode` 分两种
+  （`input.c`）：`touch`（默认）用 `BTN_TOUCH` + `ABS_X/Y` + **MT-B**（`ABS_MT_SLOT`/
+  `POSITION_X`/`POSITION_Y`/`TRACKING_ID`，松手把 `TRACKING_ID` 发 `-1`）+ `INPUT_PROP_DIRECT`；
+  `pointer` 用 `BTN_LEFT`/`BTN_RIGHT` + `ABS_X/Y`，不建 MT、不置 `DIRECT`。
+  （板上实测：ABS 位图含 MT_SLOT/POSITION_X/POSITION_Y/TRACKING_ID；KEY 位图含 `BTN_TOUCH`。）
 - 只测触摸时用 `insmod pud.ko input_only=1`（不注册 DRM/fbdev，`rmmod` 随时能卸），
   见 [architecture.md](architecture.md)。
 
@@ -91,7 +93,8 @@ EP1 bulk OUT  [ struct pud_ep1_header | payload ]
 
 ### EP1 header 载荷
 
-驱动 `usb.c` 的 `struct pud_ep1_header`（小端，和固件 `include/pud.h` 一致）：
+驱动 `pud.h` 的 `struct pud_ep1_header`（小端，和固件 `include/pud.h` 一致；`usb.c` 只是
+把它放在 `encoder_buf` 最前面）：
 
 ```c
 struct pud_ep1_header {
@@ -185,18 +188,21 @@ usb_bulk_msg(udev, usb_rcvbulkpipe(udev, EP2_IN_ADDR), data, len, &actual_length
 ```
 
 固件侧对应的结构是 `struct req_ep2_in { u16 cmd; u16 size; }` ——
-即**前 4 字节**是 `cmd`（小端）+ `size`（小端）。注意这里也用 16 字节的 wLength 传 4 字节有效数据。
+即**前 4 字节**是 `cmd`（小端）+ `size`（小端）。注意这里的 wLength 是
+`sizeof(pud->ctrl_buf)` = **32** 字节，有效数据只有前 4 字节。
 
 ### 已实现的命令
 
 | cmd | 名称 | 响应 |
 | --- | --- | --- |
 | `0x01` | `PUD_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 |
-| `0x02` | `PUD_CMD_GET_CAPS` | 16 字节 `struct pud_caps`（magic / proto_ver / frame_max / decoder_type） |
+| `0x02` | `PUD_CMD_GET_CAPS` | `struct pud_caps`（共 **32** 字节：前 16 是 magic / proto_ver / frame_max / decoder_type，其后是面板参数；老固件只回前 16 字节） |
 | 其他 | — | 固件回**零长度包**（主机读回短包 → 判定不支持） |
 
-驱动侧调用点：`pud_read_unique_id()` 与 `pud_read_caps()`，都由 `pud_probe()` 在注册
-显示设备之后调用。
+驱动侧调用点（都在 `pud_probe()` 里，**顺序不要调换**）：`pud_query_caps()` 查能力报告，
+**在任何注册之前** —— DRM mode、`encoder_buf` 大小、fbdev 显存、输入设备轴范围都由它推出来
+（见 [architecture.md](architecture.md) 的"设备参数"）；`pud_read_unique_id()` 在注册显示设备
+之后，只把序列号打进 dmesg。
 
 ### `PUD_CMD_GET_CAPS`：设备上报自己的传输上限
 
@@ -225,7 +231,7 @@ struct pud_caps {
 `EP1_RD_BUF_SIZE` 和帧槽大小（`PUD_MAX_TRANSFER`），而它按板子不同 —— RP2040 只有
 256 KB SRAM，塞不下 RP2350 的 128 KB + 2×64 KB。这样一份驱动就能同时服务两种板子。
 
-- `pud_read_caps()` 把结果落到 `pud->frame_max` / `pud->max_band_pixels`
+- `pud_apply_caps()` 把结果落到 `pud->frame_max` / `pud->max_band_pixels`
   （= `(min(USB_TRANS_MAX_SIZE, frame_max) - 12 - 16) / 3`，QOI 最坏 3 B/px + 16 B 头尾
   + 12 B EP1 header），`pud_fb_dirty()` 用它算 `rows`。
 - `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE；
@@ -239,8 +245,10 @@ struct pud_caps {
   `pud_framebuffer_alloc()` 拿得到参数。
 - 老固件（只回 16 字节）→ 面板参数保持 `pud_default_display`（480×320/旋转 0/16 bpp），
   日志里写 `old firmware: no panel parameters`。
-- 响应缓冲直接用 `pud->ctrl_buf`（16 B，嵌在堆上的 `struct pud` 里 → DMA 可映射 ✓，
-  符合"传输 buffer 不能是栈"的约束），并 `BUILD_BUG_ON` 保证结构体不超过它。
+- 响应缓冲是 `pud_probe()` 里 `kzalloc(sizeof(*caps))` 出来的那份 `struct pud_caps`
+  （堆 → DMA 可映射 ✓，符合"传输 buffer 不能是栈"的约束）；`ctrl_buf`（**32 B**）只装
+  EP0 那 4 字节请求头。**没有** `BUILD_BUG_ON` 之类的编译期兜底 —— 长度靠 `caps_len`
+  在运行期判断（见 [architecture.md](architecture.md) 的"设备参数"）。
 - **必须校验 `magic`**：老固件没有这条命令，会用 EP2 缓冲里的残留内容应答
   （实测新固件上 `cmd=0x7f` 曾把上一次的 caps 原样发回），所以"收到 16 字节"不等于
   "设备支持该命令"。magic 不匹配就保留 `PUD_DEFAULT_BAND_PIXELS` 并 `dev_warn`。
@@ -254,7 +262,7 @@ struct pud_caps {
 
 改动任何字段都要同步这四处：
 
-1. 驱动 `usb.c` 的结构体/填充函数（如 `pud_feed_ctrl_buf()`）
+1. 驱动 `usb.c` 的结构体与填充处（如 `pud_transfer()` 里那 4 字节请求头）
 2. 固件 `src/cherryusb/usbd_vendor.c` 的对应结构体与 `vendor_request_handler()`
 3. 本文件与 `Pico-USB-Display/notes/usb-protocol.md`
 4. 两侧的缓冲尺寸常量（`USB_TRANS_MAX_SIZE` ↔ `DECODER_FRAME_MAX`）

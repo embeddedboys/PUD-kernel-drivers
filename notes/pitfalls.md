@@ -117,7 +117,6 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 | --- | --- | --- | --- |
 | `pud_transfer()` EP0 | control OUT | `pud->ctrl_buf`（嵌在 `struct pud`，`devm_drm_dev_alloc` → 堆） | ✅ |
 | `pud_transfer()` EP2 | bulk IN | 调用者传入（`pud_read_unique_id` → `kzalloc(8)`） | ✅ |
-| `pud_flush()` EP0 | control OUT | `pud->ctrl_buf` | ✅ |
 | `pud_flush()` EP1（同步） | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
 | `pud_flush()` EP1（异步） | bulk OUT（`usb_submit_urb`） | `pud->encoder_buf`，`transfer_dma = encoder_dma` + `URB_NO_TRANSFER_DMA_MAP` | ✅ |
 | `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kzalloc` | ✅ |
@@ -164,62 +163,42 @@ struct pud_usb_bulk_context ctx;   /* 含 usb_sg_request + timer_list，确实�
 
 ## 二、USB 传输细节
 
-### 2.1 `pud_transfer()` 的返回值可能未初始化（**未修**）
+### 2.1 `pud_transfer()` 丢掉 EP0 的返回值（**未修**）
 
 ```c
-int rc, actual_length;                 /* actual_length 未初始化 */
-...
-rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length, PUD_DEFAULT_TIMEOUT);
-return actual_length;                  /* ← 可能是栈上垃圾值 */
+int rc, actual_length;
+
+rc = usb_control_msg(...);          /* ← 失败也不管：rc 紧接着被覆盖 */
+rc = usb_bulk_msg(udev, pipe, (void *)data, len, &actual_length,
+                  PUD_DEFAULT_TIMEOUT);
+if (rc)
+        return rc;
+return actual_length;
 ```
 
-因为 `usb_bulk_msg()`（`drivers/usb/core/message.c`）有两条**提前返回且不写
-`*actual_length`** 的路径：
+- **返回值本身现在是安全的**。曾经担心的是"`actual_length` 未初始化就被返回"：
+  `usb_bulk_msg()`（`drivers/usb/core/message.c`）确实有两条提前返回、不写
+  `*actual_length` 的路径（`!ep || len < 0` → `-EINVAL`，`usb_alloc_urb()` 失败 →
+  `-ENOMEM`），但它们都返回**非零** rc，而现在的代码遇到非零 rc 就直接返回 rc，
+  走不到 `return actual_length`。
+- **仍然成立的一条**：EP0 控制请求（那 4 字节请求头）失败时被无视，照样去发 bulk ——
+  设备可能拿上一次的请求来解释这一笔。改法就是 `if (rc < 0) return rc;`。
+- `pud_read_unique_id()` 的返回值在 `pud_probe()` 里**没人查**：读失败只会打印 8 个
+  `0x00`，毫无提示（序列号只进 dmesg，所以影响有限）。
 
-```c
-ep = usb_pipe_endpoint(usb_dev, pipe);
-if (!ep || len < 0)
-        return -EINVAL;                /* *actual_length 未赋值 */
-urb = usb_alloc_urb(0, GFP_KERNEL);
-if (!urb)
-        return -ENOMEM;                /* *actual_length 未赋值 */
-```
+### 2.2 `pud_flush()` 里未检查的 EP0 控制请求（**已随 v2 消失**）
 
-另外两次调用的 `rc` 都被丢弃：EP0 控制请求失败时照样会去发 bulk。
+v1 是"EP0 窗口协商 + EP1 数据"两次传输，控制请求失败却继续发 payload，设备就会用
+**上一个矩形窗口**画新数据。v2 把 12 字节头放进 `encoder_buf`、与载荷**一次 bulk 传完**，
+这条路连同这个坑一起没有了 —— 现在 `pud_flush()` 里根本没有控制请求。
 
-**建议改法**：
+### 2.3 "16 字节 wLength 配 12 字节结构体"（**已消失**）
 
-```c
-int rc, actual_length = 0;
-
-rc = usb_control_msg(...);
-if (rc < 0)
-    return rc;
-
-rc = usb_bulk_msg(udev, pipe, data, len, &actual_length, PUD_DEFAULT_TIMEOUT);
-return rc < 0 ? rc : actual_length;
-```
-
-并且 `pud_read_unique_id()` 的返回值应被 `pud_probe()` 检查 ——
-现在被直接忽略，读失败时只会打印 8 个 `0x00` 而毫无提示。
-
-### 2.2 `pud_flush()` 里未检查的 EP0 控制请求（已修）
-
-控制请求失败却继续发 payload，设备会用**上一个矩形窗口**去画新数据。
-现在失败即返回：
-
-```c
-rc = usb_control_msg(...);
-if (rc < 0)
-    return rc;
-```
-
-### 2.3 协议层的两处不一致
-
-`usb_control_msg(..., sizeof(pud->ctrl_buf) /* 16 */, ...)` 但 `struct req_ep1_out` 只有
-12 字节；`size` 还会被 `pud_flush()` 向上取偶加 1（设备奇偶都接受，取偶只为兼容 2026-09
-之前会拒绝奇数 `size` 的老固件）。现在两者都无害。
-细节见 [usb-protocol.md](usb-protocol.md) 的"已知不一致"两节 —— 目前无害但脆。
+那条说的是 v1 的窗口请求：`usb_control_msg(..., sizeof(pud->ctrl_buf) /* 16 */, ...)`
+配一个只有 12 字节的 `struct req_ep1_out`。**`req_ep1_out` 现在全仓不存在**（`grep` 只剩
+这句话自己）。其中仍然成立的是**取偶**那一半：`pud_flush()` 会把 `size` 向上取到偶数
+（`if (data_size % 2) data_size += 1;`）—— 设备奇偶都收，取偶只为兼容 2026-09 之前会拒绝
+奇数 `size` 的老固件，见 [usb-protocol.md](usb-protocol.md) 的"`size` 的奇偶"。
 
 ---
 
