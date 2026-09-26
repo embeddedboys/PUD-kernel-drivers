@@ -14,6 +14,11 @@ distribution kernel (the branch follows the machine's generic kernel, so its
 name moves with it); it builds natively (`make modules`) and can be exercised
 against a real panel inside QEMU, see
 [notes/build-and-test.md](./notes/build-and-test.md) section C.
+`7.2.7-1-cachyos` carries that same port onto a CachyOS 7.2 kernel: the driver
+code differs by one compile-time rename (`struct drm_atomic_state` became
+`struct drm_atomic_commit`, with no alias left behind), and because that kernel
+is clang-built the build line is `make CC=clang LD=ld.lld modules` -- see
+[notes/build-and-test.md](./notes/build-and-test.md) section D.
 
 install tools
 ```bash

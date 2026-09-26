@@ -26,8 +26,9 @@
 - **提交一律带 `Signed-off-by`**：用 `git commit -s`（仓库既有历史都带 sign-off）
 - 提交信息用**内核风格**：`模块: 组件: 简述`，正文写清具体改了什么、为什么、效果；
   一个逻辑改动一个提交，不要把互不相关的改动塞进同一个提交
-- 分支：上游主线 `kernel-6.12`；本项目的 6.1 移植分支 `rk-6.1.172`；本机 generic 内核的
-  `7.0.0-34-generic`（名字跟运行内核走，内核升级后改名，如 `7.0.0-31-generic` → `7.0.0-34-generic`）
+- 分支：上游主线 `kernel-6.12`；本项目的 6.1 移植分支 `rk-6.1.172`；本机内核的
+  `7.0.0-34-generic`（Ubuntu，名字跟运行内核走，内核升级后改名，如 `7.0.0-31-generic`
+  → `7.0.0-34-generic`）和 `7.2.7-1-cachyos`（CachyOS，代码从 7.0 那支移植）
 
 ## 构建（两种模式，别混）
 
@@ -47,6 +48,9 @@
   或板子 headers），此时 host 工具本来就能跑，不会走上面的副本路径。
 - 验证面：`modinfo pud.ko | grep vermagic`、`dmesg | grep -i pud`。
   细节见 [`notes/build-and-test.md`](notes/build-and-test.md)。
+- **内核是 clang 编的**（如 CachyOS 的 `7.2.7-1-cachyos`）就得
+  `make CC=clang LD=ld.lld modules`：gcc 会先报
+  `compiler differs from the one used to build the kernel`，再报一串 clang 专有选项不认识。
 
 可调构建开关：
 
@@ -70,8 +74,11 @@
    （`pud->max_band_pixels`）保证。这个上限**由设备通过 `PUD_CMD_GET_CAPS` 上报**
    （真机日志 `caps: proto 2, frame_max 65536, decoder 3 -> 21835 pixels per band`；
    `USB_TRANS_MAX_SIZE` 是 65535，所以 `min()` 之后落到 21835），
-   拿不到时退回 `PUD_DEFAULT_BAND_PIXELS`（21835 px）。
-   **不要把它改回写死的常量** —— RP2040 的固件只接受一半大小的传输。
+   拿不到时退回 `PUD_DEFAULT_BAND_PIXELS`（**10913 px**：按**最小**的设备算，也就是
+   RP2040 那种 `frame_max 32768` 固件报出来的值；兜底宁可多分几条带，也不能发一条
+   装不下的 —— 装不下的带会被固件丢掉而且不重试）。
+   **不要把它改回写死的常量** —— RP2040 的固件只接受一半大小的传输
+   （2026-09 实测：`caps: proto 2, frame_max 32768, decoder 3 -> 10913 pixels per band`）。
    同一个命令还上报**面板参数**（分辨率/旋转/bpp/总线时钟/触摸轮询周期），
    DRM mode、`encoder_buf`、fbdev 显存、输入设备轴范围都由它推出来 ——
    **不要在驱动里写死 480×320**（见 [`notes/architecture.md`](notes/architecture.md) 的"设备参数"）。

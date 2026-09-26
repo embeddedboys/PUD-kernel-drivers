@@ -154,7 +154,7 @@ drm_plane_enable_fb_damage_clips(&pud->pipe.plane);
 ```c
 /* pud->max_band_pixels 由 PUD_CMD_GET_CAPS 在 probe 时问设备得到：
  *   (min(USB_TRANS_MAX_SIZE, caps.frame_max) - PUD_EP1_HEADER_SIZE - 16) / 3
- * 拿不到能力报告时退回 PUD_DEFAULT_BAND_PIXELS (= 21835)。 */
+ * 拿不到能力报告时退回 PUD_DEFAULT_BAND_PIXELS (= 10913，按最小的设备算)。 */
 
 rows = pud->max_band_pixels / (rect->x2 - rect->x1);          /* 每条带的行数 */
 if (rows < 1) rows = 1;
@@ -281,11 +281,11 @@ if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
 
 ## 各内核分支的 API 差异
 
-本驱动同时维护 `kernel-6.12`（上游）、`rk-6.1.172`（板子）和 `7.0.0-34-generic`（本机
-generic 内核，名字跟运行内核走）分支。
+本驱动同时维护 `kernel-6.12`（上游）、`rk-6.1.172`（板子）、`7.0.0-34-generic`（Ubuntu
+本机内核）和 `7.2.7-1-cachyos`（CachyOS 本机内核，代码从 7.0 那支移植）分支。
 
 **流水线不一样**：`kernel-6.12` 和 `rk-6.1.172` 用的还是 `drm_simple_display_pipe`
-（它们的内核里它还完好），本机这支是上面那套内联版 —— 往前走到 7.3+ 的就是后者。
+（它们的内核里它还完好），本机这两支是上面那套内联版 —— 往前走到 7.3+ 的就是后者。
 
 ### 6.12 与 6.1
 
@@ -315,3 +315,21 @@ generic 内核，名字跟运行内核走）分支。
 
 `pud_drm_alloc()` 用 `devm_drm_dev_alloc()`，失败时返回 `ERR_PTR(-ENOMEM)` ——
 调用方**必须**用 `IS_ERR()` 判断而不是 `if (!drm)`，否则会把错误指针当设备用（曾因此 oops）。
+
+### 7.0 与 7.2
+
+| 7.0 写法 | 7.2 写法 |
+| --- | --- |
+| `struct drm_atomic_state` | `struct drm_atomic_commit`（7.2 直接改名，**没留别名**） |
+
+7.2 上唯一编不过的就是这个类型名。跟着改的是 CRTC 与 plane 的四个回调
+（`atomic_check` / `atomic_enable` / `atomic_disable` / `atomic_update`）以及
+`drm_atomic_get_new_crtc_state()`、`drm_atomic_get_new_plane_state()`、
+`drm_atomic_get_old_plane_state()`、`drm_atomic_add_affected_planes()` 的参数类型；
+遍历宏 `for_each_new_*_in_state()` 名字没变，只是它的 `__state` 参数换成了
+`struct drm_atomic_commit *`。不改就是 11 个 error + 5 个 warning
+（`-Wincompatible-pointer-types` / `-Wincompatible-function-pointer-types`，
+外加 `struct drm_atomic_state` 的 `-Wvisibility` —— 头文件里已经没有这个类型了）。
+
+上面那张"6.12 与 7.0"的表在 7.2 上仍然成立（fbdev 客户端与 `.fbdev_probe`、
+`fmtcnv_state`、timer 改名、`.date` 删除、`prefer_shadow_fbdev` 消失都没再变）。

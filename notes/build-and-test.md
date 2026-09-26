@@ -55,7 +55,9 @@ vmap 地址 —— 这正是同步路径要建 SG 表的原因（见 [pitfalls.m
 header（`12+size` 超限、矩形越界）是**丢弃并重新武装**，不再 stall EP1
 （`g_ep1_stat.oversize` 增长，宿主看不到错误；用临时超限补丁验证）。历史上是
 "stall → 主机 `clear_halt` 重试"才把宿主控制器卡死到连板子都重启不干净，所以
-`pud_flush()` 里那段 `usb_clear_halt()` 现在只是防御（老固件/控制器级 stall）。
+`pud_flush()` 里那段 `usb_clear_halt()` 现在只是防御（老固件/控制器级 stall），
+而且**只对真正的 stall 生效** —— `-ENOENT`/`-ECONNRESET`/`-ESHUTDOWN` 是"管道没了"，
+不再去清 halt（见 D 节末）。
 
 ## 两种构建模式
 
@@ -194,6 +196,85 @@ make qemu PASSTHROUGH=0            # 不把面板交给客户机
 实测（2026-09，7.0.0-34 客户机 + 真设备直通）：写 `/dev/fb0` 64 KB 随机像素 → EP1 7 笔 ~95 KB
 （QOI 编码，见 [display-and-refresh.md](display-and-refresh.md)）；
 `poweroff` 时客户机 dmesg 末尾出现 `pud_drm_pipe_disable`（`usb_driver.shutdown` 那条路径）。
+
+### D. CachyOS 本机内核（`7.2.7-1-cachyos`）
+
+`7.2.7-1-cachyos` 是这套驱动在本机 CachyOS 内核上的分支，代码从 `7.0.0-34-generic` 那支
+移植过来，流程与 C 节相同（`KERN_DIR` 默认就是本机内核，`ARCH`/`CROSS_COMPILE` 默认也对），
+**但这个内核是 clang 编的，必须用 clang 与 lld**：
+
+```bash
+make CC=clang LD=ld.lld modules
+```
+
+用 gcc 会先报 `compiler differs from the one used to build the kernel`，再报一串 clang 专有
+选项不认识（`-mstack-alignment=8`、`-mretpoline-external-thunk`、
+`-fexperimental-late-parse-attributes`、`-fsplit-lto-unit`、`-fdebug-info-for-profiling`、
+`-mllvm -improved-fs-discriminator=true`）。本机 `/usr/bin/clang` 与编内核的版本一致（clang
+22.1.8），`ld.lld` 也来自同一个包。
+
+7.0 那支的移植在 7.2 上几乎原样成立，**只有一处编译期差异**：`struct drm_atomic_state` 在
+7.2 里改名为 `struct drm_atomic_commit`，而且**没有留别名**；CRTC/plane 的四个回调签名跟着
+变了（见 [display-and-refresh.md](display-and-refresh.md) 的"7.0 与 7.2"）。不改就是
+11 个 error + 5 个 warning。
+
+实测（2026-09，**只到编译**）：`make CC=clang LD=ld.lld modules` 在两种
+`PUD_USB_ASYNC`（`0` 与 `1`）下都是 0 error / 0 warning（vendored 的 `jpegenc.c` 也已被
+`CFLAGS_jpegenc.o` 静音），`modinfo -F vermagic` =
+`7.2.7-1-cachyos SMP preempt mod_unload`，与 `uname -r` 一致；
+`modinfo -F depends` = `drm_dma_helper`（7.2 把 fbdev 的 DMA 后备存储放在这个**可加载模块**
+里，靠符号依赖拉出来 —— 加载前要先 `modprobe`，见 C 节与 [pitfalls.md](pitfalls.md) 4.4）。
+
+**7.2 上已验证（2026-09，客户机 = 本机内核 7.2.7-1-cachyos，真设备直通）**：一次
+`make qemu` 跑完 probe → caps → DRM 注册 → fbcon 接管 → 写 `/dev/fb0` → `rmmod`，
+dmesg 里的关键行（原文）：
+
+```
+pud 1-1:1.0: EP1 transfer path: sync usb_sg (usb_sg_init)
+pud 1-1:1.0: caps: proto 2, frame_max 32768, decoder 3 -> 10913 pixels per band
+pud 1-1:1.0: panel: 480x320, rotation 1, 16 bpp, 50000 kHz, interface 0, 70x40 mm, touch yes
+pud-drm: mode: 480x320
+pud-drm: pud_drm_register
+[drm] Initialized pud-drm 1.0.0 for 1-1:1.0 on minor 0
+pud 1-1:1.0: [drm] fb0: pud-drmdrmfb frame buffer device
+input: pud touch panel as /devices/.../usb1/1-1/1-1:1.0/input/input6
+```
+
+客户机里 `/sys/class/drm/card0-USB-1` 是 `connected enabled`、`/sys/class/graphics/fb0 =
+pud-drmdrmfb`，写 64 KB 到 `/dev/fb0` 返回成功，**面板上真的出现了 fbcon 的控制台光标**，
+`refcnt` 回到 0、`rmmod` 干净，整份日志里 **0 个 `WARNING:`/`BUG:`/`Call Trace`**，
+关机走的是 `reboot: Power down`（没有挂住）。
+
+两点值得记下来：
+
+- **caps 的 `frame_max` 随固件变**：这次报的是 **32768**（→ 10913 px 一个带），而不是
+  [AGENTS.md](../AGENTS.md) 不变量 3 里那条历史日志的 65536（→ 21835）。驱动没有写死，
+  分带预算整个是从 caps 推出来的 —— 这正是那条不变量要的行为，RP2040 的固件报一半大小
+  （见 AGENTS.md 同一节）。看带宽问题时先把这一行抓出来。
+- **卸载时那条 `EP1 transfer failed (-108)` 是卸载路径，不是故障**：`rmmod` 先把接口摘掉
+  （`usbcore: deregistering interface driver pud`），此时正在飞的控制台刷新
+  （`480x22+0+8, 30640 bytes` = 一行文本，就是闪烁的光标）拿到 `-108`(ESHUTDOWN)。
+  这次实测之后 `usb.c` 不再为"管道没了"去 `usb_clear_halt()`：`-ENOENT`/`-ECONNRESET`/
+  `-ESHUTDOWN` 直接跳过（与 EP4 重提交路径忽略的三个状态一致），所以再跑不会再有
+  "clearing the halt" 那一行；真正的 stall（`-EPIPE` 等）照旧清 halt。
+
+C 节那套 `make qemu` 在 CachyOS 上要额外满足四个条件，都是实测出来的（2026-09）：
+
+| 条件 | 为什么 / 怎么做 |
+| --- | --- |
+| `qemu-hw-usb-host` | Arch 把 QEMU 拆成多个包：`qemu-system-x86` **不带** `usb-host`，所以 `-device help` 里没有它、`make qemu` 报 `'usb-host' is not a valid device model name`。装上之后 `-device help` 里有 `name "usb-host", bus usb-bus`。`sudo pacman -S qemu-hw-usb-host` |
+| **静态链接的** busybox | `virtme-run` 要做一个 initramfs，找不到 busybox 就报 `initramfs is needed, and no busybox was found`；但**找到动态链接的照样不行**。Arch 系 `$PATH` 里没有 busybox，mkinitcpio 的 `/usr/lib/initcpio/busybox` 是**动态**的（`ldd` 会列出 libc/libcrypt），而 vng 只把这一个文件塞进 initramfs —— `/bin/sh` 于是起不来，客户机直接 panic：`Failed to execute /init (error -2)`、`Requested init ... failed (error -2)`。**判断标准是 `ldd <busybox>` 输出 `not a dynamic executable`**；busybox.net 的 `downloads/binaries/1.35.0-x86_64-linux-musl/busybox` 就是静态的，用它：`VNG_OPTS='--busybox /path/to/static/busybox'`。上游也是这个要求（`please install busybox-static`） |
+| 可读的客户机内核镜像 | CachyOS 的 `/boot/vmlinuz-*` 是 root 只读，`qemu.sh` 的兜底是 apt/dpkg（只在 Ubuntu 有效）。`/usr/lib/modules/$(uname -r)/vmlinuz` 本机可读，但 `KERNEL_IMG` 要用**文件名含 `vmlinuz-<rel>` 的路径**（脚本按它推 release），例如软链到 `~/.cache/pud-kbuild/img/vmlinuz-$(uname -r)`，或 `sudo cp /boot/vmlinuz-$(uname -r) ~/.cache/pud-kbuild/img/` |
+| `/dev/bus/usb`（直通必需） | `usb-host` 需要打开 `/dev/bus/usb/<bus>/<dev>`。没有它 QEMU **不报错**，只是永远不把设备接上客户机：客户机里 `xhci_hcd` 起得来、`grep 2e8a /sys/bus/usb/devices/*/idVendor` 却是空的。遇到"驱动加载了但什么都没 probe"，先查这个 |
+
+`virtme-ng` 装在仓库根的 `.venv`（`python3 -m venv .venv && .venv/bin/pip install virtme-ng`），
+`qemu.sh` 就找这个路径。客户机启动时 `vng` 默认把串口控制台丢进 `/dev/null`，**把输出重定向到
+文件时看不到客户机的 dmesg，要加 `-v -v`**（走 `VNG_OPTS`）。另外 `qemu.sh` 自己那几行 `say`
+在 stdout 不是终端时会被 bash 缓冲掉（脚本最后 `exec` 掉自己，缓冲没来得及 flush），所以
+日志里可能只剩客户机的输出。
+
+`/dev/kvm` 能访问时 `vng` 用硬件加速，否则退回 **TCG** —— 能跑，上面这次从开机到跑完
+`insmod`/`rmmod` 一共约 20 s。
 
 ## 真机验证流程
 
