@@ -42,19 +42,19 @@ pud_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 }
 
 static void pud_crtc_atomic_enable(struct drm_crtc *crtc,
-                                   struct drm_atomic_state *state)
+                                   struct drm_atomic_commit *state)
 {
 	pr_info("%s\n", __func__);
 }
 
 static void pud_crtc_atomic_disable(struct drm_crtc *crtc,
-                                    struct drm_atomic_state *state)
+                                    struct drm_atomic_commit *state)
 {
 	pr_info("%s\n", __func__);
 }
 
 static int pud_crtc_atomic_check(struct drm_crtc *crtc,
-                                 struct drm_atomic_state *state)
+                                 struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *crtc_state =
 	        drm_atomic_get_new_crtc_state(state, crtc);
@@ -239,7 +239,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 }
 
 static int pud_plane_atomic_check(struct drm_plane *plane,
-                                  struct drm_atomic_state *state)
+                                  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *plane_state =
 	        drm_atomic_get_new_plane_state(state, plane);
@@ -259,7 +259,7 @@ static int pud_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void pud_plane_atomic_update(struct drm_plane *plane,
-                                    struct drm_atomic_state *state)
+                                    struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *plane_state = plane->state;
 	struct drm_plane_state *old_plane_state =
@@ -685,7 +685,7 @@ static int pud_drm_dev_init_with_formats(
 
 	pud->pixel_format = formats[0];
 
-	drm_dbg_kms(drm, "mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
+	drm_dbg_kms(drm, "mode: %ux%u\n", pud->mode.hdisplay, pud->mode.vdisplay);
 
 	return 0;
 }
