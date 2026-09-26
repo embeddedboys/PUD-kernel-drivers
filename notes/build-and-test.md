@@ -221,7 +221,7 @@ ssh <board>
   scripts/pud-load.sh reload input_only=1      # 换参数/换 .ko 时用
 ```
 
-它替你做掉两件以前靠人记的事：
+它替你做掉三件以前靠人记的事：
 
 1. **vermagic 校验**：`modinfo -F vermagic` 必须等于 `uname -r`，否则直接拒绝加载并说明
    原因 —— 这代替了以前"人工对 md5"，而且能同时抓住"传了旧 `.ko`"和"编错了内核"两类事故（
@@ -231,6 +231,10 @@ ssh <board>
    `--stop-dm`；带该参数时按"停显示管理器 → rmmod → 起回来"走一遍，即使 rmmod 失败也会把
    会话拉回来。显示管理器是 `systemctl is-active` 问出来的（gdm/lightdm/sddm…，`PUD_DM=<unit>`
    可以覆盖），所以换成别的桌面发行版也不用改脚本。
+
+3. **依赖先加载**：`insmod` 自己不会解析依赖，而 7.0 把 fbdev 客户端放进了 drm 核心、
+   DMA helper 放在 `drm_dma_helper` —— 脚本按 `modinfo -F depends` 先 `modprobe -a`。
+   漏掉这一步就是 `Unknown symbol in module`（见 [pitfalls.md](pitfalls.md) 4.4）。
 
 `PUD_KO=/path/to/pud.ko` 可以指定别的模块（默认为仓库根的 `./pud.ko`），
 `MODULE=` 可以换模块名。工具只依赖 `kmod`/`lsof`/`systemctl`，不带任何本机路径。

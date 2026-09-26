@@ -290,6 +290,8 @@ insmod: ERROR: could not insert module pud.ko: Unknown symbol in module
 
 两条路：先 `modprobe drm_dma_helper`（它会把 `drm` 带起来）再 `insmod`；或者把模块放进
 `/lib/modules/$(uname -r)` 下用 `modprobe pud`，由 `modules.dep` 解决依赖。
+`scripts/pud-load.sh` 现在自己会做第一步（读 `modinfo -F depends` 再 `modprobe -a`）；
+`modprobe --show-depends <路径>` 对 out-of-tree 的 `.ko` **不**解析依赖，别指望它。
 只看 `insmod` 的错误看不出是哪个符号，`dmesg` 里才有：
 `pud: Unknown symbol drm_fbdev_dma_driver_fbdev_probe (err -2)`。
 

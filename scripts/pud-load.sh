@@ -91,19 +91,45 @@ do_load() {
         return 0
     fi
 
+    # insmod resolves nothing: the module's own dependencies have to be loaded
+    # first or the kernel refuses with "Unknown symbol in module" (7.0 keeps the
+    # fbdev client in the drm core and the DMA helpers in drm_dma_helper, both
+    # of which pud.ko imports from).  modinfo knows the list.
+    local deps
+    deps=$(modinfo -F depends "$KO" 2>/dev/null | tr ',' ' ')
+    if [ -n "$deps" ]; then
+        say "modprobe $deps"
+        modprobe -a $deps || die "could not load the module's dependencies: $deps"
+    fi
+
     say "insmod $KO $*"
-    insmod "$KO" "$@" || die "insmod failed"
+    if ! insmod "$KO" "$@"; then
+        dmesg | grep -i "$MODULE" | tail -n 3 | sed 's/^/  /'
+        die "insmod failed"
+    fi
     sleep 1
     say ""
     do_status
 }
 
-do_unload() {
-    local stop_gdm=0
+# The display manager to stop around an unload: whatever systemd says is
+# running, so this works on gdm, lightdm, sddm and friends alike.  PUD_DM
+# overrides it for setups that run something else entirely.
+dm_unit() {
+    local u
+    for u in ${PUD_DM:-} gdm gdm3 lightdm sddm lxdm xdm ly greetd; do
+        [ -n "$u" ] || continue
+        systemctl is-active --quiet "$u" 2>/dev/null && { printf '%s\n' "$u"; return 0; }
+    done
+    return 1
+}
 
-    if [ "${1:-}" = "--stop-gdm" ]; then
-        stop_gdm=1
-    fi
+do_unload() {
+    local stop_dm=0
+
+    case "${1:-}" in
+        --stop-dm|--stop-gdm) stop_dm=1 ;;
+    esac
 
     if ! loaded; then
         say "${MODULE} is not loaded"
