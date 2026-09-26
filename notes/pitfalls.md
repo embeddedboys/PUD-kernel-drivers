@@ -244,6 +244,22 @@ case DRM_FORMAT_RGB565:
 驱动侧无需改动。排查顺序见 [display-and-refresh.md](display-and-refresh.md)
 最后一节。
 
+### 3.6 7.0：没有 `.fbdev_probe` 就没有 `/dev/fb0`
+
+7.0 把 fbdev 模拟拆成两半：`drm_client_setup()` 只**注册客户端**，真正分配 fbdev 后备存储
+（以及设置 `fb_helper->funcs`）的是驱动的 `.fbdev_probe`，由 `DRM_FBDEV_DMA_DRIVER_OPS` 提供。
+`drm_fb_helper_single_fb_probe()` 第一句就是：
+
+```c
+if (drm_WARN_ON(dev, !dev->driver->fbdev_probe))
+	return -EINVAL;
+```
+
+**症状**：`insmod` 成功、DRM 设备注册成功、`/dev/dri/card0` 在，但**没有 `/dev/fb0`**、
+fbcon 不接管，dmesg 里只有一条 `WARNING`。移植时代码能编过、probe 也不报错，所以很容易漏。
+6.1/6.12 的 `drm_fbdev_generic_setup()` / `drm_fbdev_dma_setup()` 是自己把这件事做掉的，
+7.0 换成了这一对组合。
+
 ---
 
 ## 四、模块生命周期
@@ -262,3 +278,17 @@ case DRM_FORMAT_RGB565:
 
 构建 6.1.172 时需要用 `KERN_OBJ_DIR` 指向 objtree，而不是去 `KERN_DIR` 里补文件。
 **`KERN_DIR` 只读**。
+
+### 4.4 7.0：`insmod` 报 `Unknown symbol in module`
+
+7.0 的 fbdev 客户端在 drm 核心里，模块引用的 `drm_fbdev_dma_driver_fbdev_probe` 与
+`drm_client_setup` 都出自 `drm.ko`，而 `modinfo` 的 `depends:` 只写着 `drm_dma_helper`：
+
+```
+insmod: ERROR: could not insert module pud.ko: Unknown symbol in module
+```
+
+两条路：先 `modprobe drm_dma_helper`（它会把 `drm` 带起来）再 `insmod`；或者把模块放进
+`/lib/modules/$(uname -r)` 下用 `modprobe pud`，由 `modules.dep` 解决依赖。
+只看 `insmod` 的错误看不出是哪个符号，`dmesg` 里才有：
+`pud: Unknown symbol drm_fbdev_dma_driver_fbdev_probe (err -2)`。

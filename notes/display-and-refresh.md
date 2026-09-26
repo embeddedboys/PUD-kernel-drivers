@@ -29,15 +29,22 @@ static const struct drm_simple_display_pipe_funcs pud_display_pipe_funcs = {
 `drm_fbdev_generic_setup(drm, 0)` 建立。
 
 > **fbdev 模拟必须有 shadow buffer**，否则用户态写 `/dev/fb0` 会被**静默忽略**。这块屏不是
-> 扫描输出：像素只有靠一次提交走我们的 flush 路径才能出去。而 fbdev 模拟挑缓冲策略看的是
-> `drm_fbdev_use_shadow_fb()`（`prefer_shadow_fbdev` / `prefer_shadow` / `fb->funcs->dirty`
-> 三者之一）—— 一个都没有时它把 GEM buffer 直接映射给用户态，程序 mmap 写完**没人知道**。
+> 扫描输出：像素只有靠一次提交走我们的 flush 路径才能出去。
 >
-> 实测（2026-09）：没设这个标志时往 `/dev/fb0` 画整屏，usbmon 里 EP1 **一笔都没有**
+> 7.0 只剩一条判据：**`fb->funcs->dirty` 有没有值**。`drm_fbdev_dma_driver_fbdev_probe()`
+> 据此二选一 —— 有 dirty 走 shadowed 那一支（`vzalloc` 一块系统内存 + deferred IO，用户态
+> mmap 写完由 `drm_fb_helper_deferred_io` 变成 damage 交给我们），没有就把 GEM buffer
+> 直接映射给用户态，mmap 写完**没人知道**。`drm_gem_fb_create_with_dirty` 提供的正是这个
+> 回调（我们的 `.fb_create` 就是它）；`prefer_shadow` 只是给用户态看的提示，fbdev 客户端
+> 根本不读它。6.1 那套 `drm_fbdev_use_shadow_fb()`（`prefer_shadow_fbdev` / `prefer_shadow`
+> / `fb->funcs->dirty` 三选一）在 7.0 已经不存在。
+>
+> 实测（2026-09，6.1）：没有 shadow 时往 `/dev/fb0` 画整屏，usbmon 里 EP1 **一笔都没有**
 > （同一窗口里 fbcon 的光标和合成器的刷新都正常在发 —— 它们分别走 fb 层的显式标脏和 DRM，
 > 所以控制台与桌面看不出问题，这个坑只在 fbdev 用户态程序上暴露）；
-> `drm.c` 里设上 `drm->mode_config.prefer_shadow_fbdev = true` 之后，**同一个脚本变成
-> 4368 笔 / 2.3 MB**（脚本按行写，所以一行一次更新）。
+> 设上 `drm->mode_config.prefer_shadow_fbdev = true` 之后，**同一个脚本变成 4368 笔 / 2.3 MB**
+> （脚本按行写，所以一行一次更新）。
+> 实测（2026-09，7.0，QEMU + 真设备直通）：写 `/dev/fb0` 64 KB → EP1 7 笔 / 95780 B。
 >
 > 代价：一块整屏 shadow（480×320×2 = 300 KB）+ 每次 damage 一次拷贝。
 
@@ -241,6 +248,22 @@ if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
 | `drm_fb_xrgb8888_to_rgb565(..., fmtcnv_state)` | 少一个 `fmtcnv_state` 参数 |
 | `drm_shadow_plane_state.fmtcnv_state` | 6.1 无此字段 |
 | 若干 pipe 回调宏 | `DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS` |
+
+### 6.12 与 7.0
+
+| 6.12 写法 | 7.0 写法 |
+| --- | --- |
+| `drm_fbdev_dma_setup(drm, 0)` | `drm_client_setup(drm, NULL)` **加上**驱动里的 `DRM_FBDEV_DMA_DRIVER_OPS`（即 `.fbdev_probe`） |
+| `from_timer()` | `timer_container_of()` |
+| `destroy_timer_on_stack()` | `timer_destroy_on_stack()` |
+| `drm_dbg()` | `drm_dbg_driver()`（`drm_dbg` 在 7.0 只是它的别名） |
+| `struct drm_driver.date` | 字段已删除 |
+| `mode_config.prefer_shadow_fbdev` | 字段不存在；fbdev shadow 只认 `fb->funcs->dirty`（见上） |
+
+第一条最容易漏，而且**编得过、加载也不报错**：7.0 的 `drm_client_setup()` 只注册客户端，
+分配 fbdev 后备存储的是驱动自己的 `.fbdev_probe` —— `drm_fb_helper_single_fb_probe()` 里
+第一句就是 `if (drm_WARN_ON(dev, !dev->driver->fbdev_probe)) return -EINVAL;`。
+少了它，dmesg 里只有一条 WARN，**没有 `/dev/fb0`、没有 fbcon**。
 
 `pud_drm_alloc()` 用 `devm_drm_dev_alloc()`，失败时返回 `ERR_PTR(-ENOMEM)` ——
 调用方**必须**用 `IS_ERR()` 判断而不是 `if (!drm)`，否则会把错误指针当设备用（曾因此 oops）。

@@ -8,8 +8,14 @@
 | --- | --- | --- |
 | `KERN_DIR` | `/lib/modules/$(uname -r)/build` | 目标内核源码树 |
 | `KERN_OBJ_DIR` | 空 | 该内核的 **out-of-tree 构建目录（objtree）**，仅当内核是用 `O=` 编译时才需要 |
-| `ARCH` | `arm64` | 目标架构 |
-| `CROSS_COMPILE` | `aarch64-linux-gnu-` | 交叉编译器前缀 |
+| `ARCH` | 本机（`uname -m`） | 目标架构。交叉编译要显式传 `ARCH=arm64` |
+| `CROSS_COMPILE` | 空（本机工具链） | 交叉编译器前缀，例如 `aarch64-linux-gnu-` |
+
+默认取本机：`KERN_DIR` 默认是运行内核，本机编译和在板子上编译都是原生的。交叉编译才需要显式指定：
+
+```bash
+make modules ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+```
 
 ```bash
 make modules   KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
@@ -133,6 +139,61 @@ modinfo pud.ko | grep vermagic
 实测：板子上从零 `make` 到 `pud.ko` 全绿，`vermagic` 正确；副本 65 MB，删掉
 `~/.cache/pud-kbuild/<release>` 即重做。x86 上交叉编不受影响（host 工具本来就能跑，
 不会走副本路径）。
+
+### C. 本机内核（x86-64）与 QEMU 验证
+
+本分支（`7.0.0-34-generic`，名字跟着本机的 generic 内核走）编的就是**本机运行内核**：
+`KERN_DIR`、`ARCH`、`CROSS_COMPILE` 默认全对，一条命令就够：
+
+```bash
+make modules
+```
+
+想在不冒"把本机内核搞崩"的风险下验证驱动就用 `make qemu`：它在 QEMU 里跑一份本机 rootfs
+的快照（`virtme-ng`，装在仓库根的 `.venv` 里），把 `pud.ko` 加载进去，然后留一个 root shell
+给你 —— **本机内核从头到尾没被碰过**。
+
+```bash
+make qemu                          # 启动 + 加载 + 交互 shell
+make qemu CMD='dmesg | grep pud'   # 跑一条命令就退出
+make qemu PARAMS=report_mode=pointer
+make qemu PASSTHROUGH=0            # 不把面板交给客户机
+```
+
+`scripts/qemu.sh` 在背后做的事（出问题时照这个手工来）：
+
+- **挑客户机内核**：优先运行内核，但得看得到镜像 —— Ubuntu 的 `/boot/vmlinuz-*` 是 root:600，
+  拿不到就退到"能从 apt 缓存里的 `linux-image-*.deb` 解出来"的最新一个（解出的镜像缓存在
+  `~/.cache/pud-kbuild/img/`）。想固定用某个镜像就传 `KERNEL_IMG=/path/to/vmlinuz-<rel>`；
+  想让客户机跑**运行内核**，把它的镜像复制成可读的一份：
+  `sudo cp /boot/vmlinuz-$(uname -r) ~/.cache/pud-kbuild/img/`。
+- **按客户机内核编模块**：`vermagic` 必须一致，所以定下内核后会用 `/lib/modules/<rel>/build`
+  重编（`modinfo -F vermagic` 已经是它了就跳过）。这会覆盖仓库里的 `./pud.ko`，
+  之后 `make modules` 再把它编回运行内核。
+- **透传面板**：`lsusb` 看得到 `2e8a:0001` 时加 `-device usb-host,...`（本机没加载 pud，
+  没有驱动占着它）。客户机里的驱动于是**真的在推那块面板**，只是推送方换成了客户机内核：
+  probe → caps → DRM 注册 → fbcon 接管 → 写 `/dev/fb0` 能在 usbmon 里数到 EP1，`rmmod` 干净。
+- **首次 probe 的 caps 兜底**：设备刚交给客户机时**第一笔厂商请求可能超时**
+  （`no capability report (-110)`），驱动于是退回宿主机默认值。同一个请求从 host 问设备是好的、
+  重载一次也一定好，所以那是**模拟 xHCI 侧的时序**、不是驱动行为：脚本检测到就自动
+  `rmmod` + `insmod` 一次把真实 caps 拿回来。手工路线遇到它，重载一次即可。
+
+手工起 VM 时几个容易卡住的地方：
+
+- `vng` **没有** `--kernel` 参数。内核镜像走 `--run <bzImage>`；`--run` 不带参数就用本机运行的内核。
+- `.venv/bin` 要在 `PATH` 里：`vng` 靠它找同目录的 `virtme-run`。
+- 客户机里 `insmod` 之前先 **`modprobe drm_dma_helper`**。7.0 把 fbdev 客户端并进了 drm 核心，
+  模块引用的 `drm_fbdev_dma_driver_fbdev_probe` 出自那里；不先加载就会
+  `insmod: ERROR: could not insert module pud.ko: Unknown symbol in module`。
+- 客户机里的 `/tmp` 是它自己的，客户机一退出就没了。要把文件带出来用 `--rwdir <hostdir>`
+  （两边同一个路径，客户机可写）；`dmesg -w` 这类"边跑边写"的输出要套 `stdbuf -oL`，
+  否则块缓冲在机器断电时全丢。
+- 客户机里没有 systemd 当 PID 1（`systemctl poweroff` 不可用），要关机 `--exec` 里跑一句
+  `python3 -c "import ctypes; ctypes.CDLL(None, use_errno=True).reboot(0x4321fedc)"`。
+
+实测（2026-09，7.0.0-34 客户机 + 真设备直通）：写 `/dev/fb0` 64 KB 随机像素 → EP1 7 笔 ~95 KB
+（QOI 编码，见 [display-and-refresh.md](display-and-refresh.md)）；
+`poweroff` 时客户机 dmesg 末尾出现 `pud_drm_pipe_disable`（`usb_driver.shutdown` 那条路径）。
 
 ## 真机验证流程
 
