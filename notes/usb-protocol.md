@@ -144,7 +144,7 @@ if (data_size % 2)
 | 常量 | 值 | 位置 | 含义 |
 | --- | --- | --- | --- |
 | `USB_TRANS_MAX_SIZE` | 65535 | 驱动 `pud.h` | 主机侧单次传输上限（含 12 B header） |
-| `PUD_DEFAULT_BAND_PIXELS` | `(65535-12-16)/3` = 21835 | 驱动 `pud.h` | 拿不到能力报告时的兜底单带像素数 |
+| `PUD_DEFAULT_BAND_PIXELS` | `(65535/2-12-16)/3` = 10913 | 驱动 `pud.h` | 拿不到能力报告时的兜底单带像素数：按**最小**的设备算，与 RP2040 的 `frame_max 32768` 报出来的一致 |
 | `pud->max_band_pixels` | 21835（RP2350） | 驱动 `drm.c` | **实际使用的**单带上限，来自 `PUD_CMD_GET_CAPS` |
 | `PUD_MAX_TRANSFER` | 65536 / 32768 | 固件 `usbd_vendor.h` | **按板子**定的单次传输与帧槽上限（RP2350 / RP2040） |
 | `DECODER_FRAME_SLOTS` | 2 | 固件 `decoder.c` | 帧槽数量（双缓冲，尺寸 = `PUD_MAX_TRANSFER`） |

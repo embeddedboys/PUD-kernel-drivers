@@ -68,13 +68,16 @@ struct pud_ep1_header {
 	u32 size; /* payload bytes that follow */
 };
 
-/* Conservative band budget: one transfer of the host-side ceiling, minus the
- * EP1 header, QOI worst case (3 bytes per pixel plus the 8-byte header and
- * 8-byte end marker).  Used until the device reports its own limit through
- * PUD_CMD_GET_CAPS; an RP2040 firmware accepts half-size transfers, so the
- * reported value must win. */
+/* Fallback band budget for a device that does not answer PUD_CMD_GET_CAPS:
+ * *half* the host-side ceiling, minus the EP1 header and the QOI worst case
+ * (3 bytes per pixel plus the 8-byte header and the 8-byte end marker).  Sized
+ * for the smaller firmware on purpose: an RP2040 reports frame_max 32768, and
+ * half the ceiling lands on exactly the 10913 pixels per band that its
+ * capability report gives.  What the device reports always wins when it
+ * answers; a 64 KB firmware that stays silent only gets twice as many bands,
+ * where a band that does not fit it is dropped without a retry. */
 #define PUD_DEFAULT_BAND_PIXELS \
-	((USB_TRANS_MAX_SIZE - PUD_EP1_HEADER_SIZE - 16) / 3)
+	((USB_TRANS_MAX_SIZE / 2 - PUD_EP1_HEADER_SIZE - 16) / 3)
 
 /* Device capability report (PUD_CMD_GET_CAPS, EP2 IN).  Must match the
  * firmware's struct in the Pico-USB-Display repo (include/pud.h). */
