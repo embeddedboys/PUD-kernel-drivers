@@ -237,9 +237,12 @@ if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
 2. `pud_flush()` 是否失败而 damage 未重试（本节的兜底）
 3. damage 覆盖是否完整（`drm_atomic_helper_damage_merged` 的超集语义保证了这点）
 
-## 移植到 6.1 内核时的 API 差异
+## 各内核分支的 API 差异
 
-本驱动同时维护 `kernel-6.12`（上游）和 `rk-6.1.172`（本项目）分支。6.1 与 6.12 的差异：
+本驱动同时维护 `kernel-6.12`（上游）、`rk-6.1.172`（板子）和 `7.0.0-34-generic`（本机
+generic 内核，名字跟运行内核走）分支。
+
+### 6.12 与 6.1
 
 | 6.12 写法 | 6.1 写法 |
 | --- | --- |

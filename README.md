@@ -9,6 +9,11 @@ The deployment branch for this project's RK3588 board is `rk-6.1.172` -- the
 board's kernel, the vendor source tree and its headers package are all 6.1.172
 -- and it carries `AGENTS.md` and `notes/`; both of its build modes are in
 [notes/build-and-test.md](./notes/build-and-test.md).
+`7.0.0-34-generic` is the same driver ported forward to a current x86-64
+distribution kernel (the branch follows the machine's generic kernel, so its
+name moves with it); it builds natively (`make modules`) and can be exercised
+against a real panel inside QEMU, see
+[notes/build-and-test.md](./notes/build-and-test.md) section C.
 
 install tools
 ```bash
