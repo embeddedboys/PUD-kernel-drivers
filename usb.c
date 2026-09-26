@@ -547,7 +547,9 @@ static void __maybe_unused pud_drm_cleanup(struct usb_interface *intf)
 /*
  * Touch can be exercised on its own: with input_only=1 the driver registers
  * only the input device, so nothing creates a DRM/fbdev node for a desktop
- * session to hold open and `rmmod` keeps working between test runs.
+ * session to hold open and `rmmod` keeps working between test runs.  It also
+ * lets the panel serve as a plain input device (an absolute pointer, say) on a
+ * machine that does not want the display -- which is the reason this stays.
  */
 #if PUD_ENABLE_INPUT_SUPPORT
 static bool input_only;

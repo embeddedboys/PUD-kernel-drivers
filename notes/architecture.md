@@ -43,7 +43,7 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `input_only` | `0` | `insmod pud.ko input_only=1` 时**只注册触摸**，不注册 DRM/fbdev 节点。调触摸时用它：没有显示节点，桌面会话就不会把模块占住，`rmmod` 能立刻卸掉、反复加载。 |
+| `input_only` | `0` | `insmod pud.ko input_only=1` 时**只注册触摸**，不注册 DRM/fbdev 节点。调触摸时用它：没有显示节点，桌面会话就不会把模块占住，`rmmod` 能立刻卸掉、反复加载。**它不只是测试脚手架**：面板可以只当输入设备用（配 `report_mode=pointer` 给一台不需要显示的机器当绝对指针），所以不要提议拆掉它。 |
 | `report_mode` | `touch` | 输入设备注册成哪种：`touch`（默认）或 `pointer`（`input.c` 的 `module_param(report_mode)`），差别见下面"输入设备（EP4）"一节。 |
 | `initial_mode` | `0` | 从 probe 直接提交一次固定 mode，让**没有 userspace** 时面板也点亮（`drm.c:pud_drm_set_initial_mode()`）。默认关是有原因的：它把驱动放进"没人在环里"的发送路径，只有在固件**丢弃不可信 header 而不是 stall EP1** 之后才安全 —— 那种 stall 曾把宿主控制器卡到板子都重启不干净（见 [build-and-test.md](build-and-test.md) 的"真机对比结论"）。固件 2026-09 起已满足该条件，`initial_mode=1` 已真机验证。 |
 
