@@ -10,7 +10,7 @@ int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
 	int rc, bits;
 	int pitch, bytewidth;
 	size_t buffer_size;
-	JPEGE_IMAGE jpeg;
+	JPEGE_IMAGE *jpeg;
 	JPEGENCODE jpe;
 
 	bits = 16;
@@ -21,19 +21,27 @@ int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
 
 	buffer_size = len;
 
-	memset(&jpeg, 0, sizeof(JPEGE_IMAGE));
-	jpeg.pOutput = work_buf;
-	jpeg.iBufferSize = buffer_size;
-	jpeg.pHighWater = &jpeg.pOutput[jpeg.iBufferSize - 512];
+	/* JPEGE_IMAGE is over 3 KB -- it carries the Huffman tables and a file
+	 * buffer -- which is more than a kernel stack should hold, so it lives on
+	 * the heap.  JPEGENCODE is a few ints and stays where it is. */
+	jpeg = kzalloc(sizeof(*jpeg), GFP_KERNEL);
+	if (!jpeg)
+		return -ENOMEM;
 
-	rc = JPEGEncodeBegin(&jpeg, &jpe, w, h, JPEGE_PIXEL_RGB565,
+	jpeg->pOutput = work_buf;
+	jpeg->iBufferSize = buffer_size;
+	jpeg->pHighWater = &jpeg->pOutput[jpeg->iBufferSize - 512];
+
+	rc = JPEGEncodeBegin(jpeg, &jpe, w, h, JPEGE_PIXEL_RGB565,
 	                     JPEGE_SUBSAMPLE_420, quality);
 	if (rc == JPEGE_SUCCESS)
-		JPEGAddFrame(&jpeg, &jpe, rgb565, pitch);
+		JPEGAddFrame(jpeg, &jpe, rgb565, pitch);
 
-	JPEGEncodeEnd(&jpeg);
-	// printk("%s, jpeg size : %d\n", __func__, jpeg.iDataSize);
-	*out_size = jpeg.iDataSize;
+	JPEGEncodeEnd(jpeg);
+	// printk("%s, jpeg size : %d\n", __func__, jpeg->iDataSize);
+	*out_size = jpeg->iDataSize;
+
+	kfree(jpeg);
 
 	return rc;
 }
