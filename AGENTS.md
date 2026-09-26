@@ -130,7 +130,8 @@
 3. **gdb 读固件是 30~60 s 级**：一轮最多读一次，能用 `dmesg` 说清就不读。
 4. **驱动只编译一次**：改完一次 `make modules`，`pud.ko` 留在板子上复用。
 5. 板子重启后**总线与路径会变**（`6-1` → `3-1`）：脚本里动态发现，别写死接口路径。
-6. 下结论前**两侧对账**：主机 `dmesg`/`usbmon` 与设备侧计数器。
+6. 下结论前**两侧对账**：主机 `dmesg`/`usbmon` 与设备侧计数器
+   （怎么抓、怎么读见 [`notes/usbmon.md`](notes/usbmon.md)）。
 7. **EP1 连续失败就先卸载再查** ✗：一次 EP1 stall 足以把主机控制器卡住 ——
    之后 `usb_sg_wait()`/`usb_sg_cancel()` 不返回，DRM modeset 锁被占住，
    `/sys/kernel/debug/dri/*/state` 都读不出来，界面永久黑屏。别靠反复 reload 试探。
