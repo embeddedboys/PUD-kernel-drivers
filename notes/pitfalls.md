@@ -313,3 +313,39 @@ insmod: ERROR: could not insert module pud.ko: Unknown symbol in module
 "面板会被点亮"，没验证过卸载**，所以未必是 7.0 独有的问题。`initial_mode` 默认关闭
 （它是给"没有任何用户态来提交模式"的场景用的，见 drm.c 里 `pud_drm_set_initial_mode()`
 的注释），常规用法不受影响 —— 但**用完之后别留着它卸载模块/关机**。
+
+## 五、设备/固件状态
+
+### 5.1 面板卡死：caps 与 EP1 全部 `-71`，复位 Pico 即恢复
+
+**症状**（2026-09，CachyOS 本机 + 7.2.7-1-cachyos，插拔/直通之后加载驱动）：
+
+```
+pud 1-4:1.0: no capability report (-71), using defaults
+pud 1-4:1.0: no capability report (0 bytes); keeping 21835 pixels per band
+pud 1-4:1.0: EP1 transfer failed (-71) for 480x45+0+0, 366 bytes
+pud 1-4:1.0: EP1 failed 3 times in a row, trying once per second
+```
+
+之后每笔 EP1 都是 `-71`，一秒一笔地重试下去。**判据**（用来区分"设备卡住"和"驱动/内核问题"）：
+
+- `-71` 是 `-EPROTO`：**设备把端点 STALL 了**。主机侧的等待超时是 `-110`，别混。
+- **连 caps 控制请求都失败**（`no capability report (-71)`），而且失败的第一笔 EP1 只有
+  **366 字节** —— 与带宽、分带预算、丢帧无关。
+- 于是驱动回退默认值：`keeping 21835 pixels per band` → 日志里的带就是 `480x45`
+  （真机 caps 是 `frame_max 32768 -> 10913`，对应 `480x22`）。**看到 `480x45` 就知道 caps 没拿到**。
+- 设备本身枚举是好的：`2e8a:0001` 在、`ep_01 Bulk out / ep_82 Bulk in / ep_84 Interrupt in` 都在。
+
+**处理**：**复位 Pico**（或拔插 USB）。复位后驱动会**自动重新 probe**，不用 `rmmod`/`insmod`：
+
+```
+usb 1-4: new full-speed USB device number 5 ... Product: Pico USB Display
+pud 1-4:1.0: caps: proto 2, frame_max 32768, decoder 3 -> 10913 pixels per band
+pud-drm: pud_drm_register
+pud 1-4:1.0: [drm] fb1: pud-drmdrmfb frame buffer device
+```
+
+之后 EP1 失败归零，面板正常工作（本机是镜像模式）。**成因是推断的**：这次之前刚在 QEMU
+客户机里做过真设备直通，客户机断电时留下一笔在飞的 EP1（`EP1 transfer failed (-108)` 那条），
+设备很可能停在"等一个永远收不完的传输"的状态上；同一份 `pud.ko`、同一个内核在客户机里
+是完整跑通的，所以不像驱动/内核的问题。下次再遇到，先复位设备再查驱动。
