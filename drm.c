@@ -37,7 +37,12 @@ pud_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 	int rc;
 
 	rc = drm_crtc_helper_mode_valid_fixed(crtc, mode, &pud->mode);
-	pr_info("%s, rc: %d\n", __func__, rc);
+
+	/* Called on every mode the compositor probes, so this one has to be a DRM
+	 * debug message instead of a dmesg line -- it used to fill the log in
+	 * bursts.  Everything else in this file prints once per probe/modeset. */
+	drm_dbg_kms(crtc->dev, "%s: rc %d\n", __func__, rc);
+
 	return rc;
 }
 
