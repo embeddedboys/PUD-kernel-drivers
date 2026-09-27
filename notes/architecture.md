@@ -53,9 +53,9 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `brightness` | `-1` | 背光百分比 0..100。**固件唯一能在运行期改的参数**；注意面板 profile 会在它之上再加自己的 offset（本构型 +5%，`pico-display-lib` 的 `bl_lvl_offs`），所以"设 10%"面板会比 10% 亮一点。 |
-| `rotation` | `-1` | 面板旋转 0..3。**当前固件会拒绝**（旋转是编译期选择，且 DRM mode 也由它推出来）：驱动原样上报 rejected，不改本机几何。真有运行期旋转时，`pud_push_params()` 还得挪到 `pud_drm_alloc()` 之前才能影响本次启动的 mode。 |
-| `decoder` | `-1` | 解码器类型 0..4（`DECODER_TYPE` 编号）。**当前固件会拒绝**（编译期选择）。若设备接受了，驱动会把 `pud->decoder_type` 跟着改 —— 编码器和解码器必须一致，否则只会丢帧。 |
+| `brightness` | `-1` | 背光百分比 0..100。注意面板 profile 会在它之上再加自己的 offset（本构型 +5%，`pico-display-lib` 的 `bl_lvl_offs`），所以"设 10%"面板会比 10% 亮一点。 |
+| `rotation` | `-1` | 面板旋转 0..3。**运行期可改**（固件一侧两段式落地：caps 立刻按新几何上报，MADCTL 写由显示任务做）。驱动在 `pud_drm_alloc()` **之前**下发、下发后**重查 caps**，所以 mode/编码缓冲/输入轴范围都按新朝向建。 |
+| `decoder` | `-1` | 解码器类型 0..4（`DECODER_TYPE` 编号）。**当前固件会拒绝**（编译期选择）。设备若接受（将来同时编入多个解码器时），驱动会从重查后的 caps 里拿到新的 decoder —— 编码器和解码器必须一致，否则只会丢帧。 |
 
 ## 输入设备（EP4）
 

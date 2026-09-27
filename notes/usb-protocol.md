@@ -232,17 +232,20 @@ struct pud_param_state { u32 settable, rejected; u8 brightness, rotation, reserv
 
 - 只有 `mask` 点到的字段被设置；写本身不回数据，**回读才知道生效了什么**。
 - 载荷太短/命令头不对 → 固件 stall（不应用一半）。
-- **被拒绝的字段要如实上报**：`rejected` 里给出这次没能应用的位。今天固件只能改
-  `brightness`（`settable = PUD_PARAM_BRIGHTNESS`）：`rotation` 与 `decoder` 是编译期
-  选择。**驱动不要假装成功** —— 只有没进 `rejected` 的字段才允许影响本机状态
-  （例如 decoder 决定了驱动用哪个编码器）。
+- **被拒绝的字段要如实上报**：`rejected` 里给出这次没能应用的位。今天固件能改
+  `brightness` 与 `rotation`（`settable = PUD_PARAM_BRIGHTNESS | PUD_PARAM_ROTATION`），
+  `decoder` 仍是编译期选择。**驱动不要假装成功** —— 只有没进 `rejected` 的字段才允许影响
+  本机状态。
+- **rotation 会改几何，所以顺序是规矩不是风格**：`pud_push_params()` 在
+  `pud_drm_alloc()` **之前**调用，之后**必须重查一次 caps** —— 设备的 caps 立刻按新朝向
+  上报（`xres/yres` 交换），而 DRM mode、`encoder_buf`、fbdev 显存、输入轴范围全是从那份
+  报告推出来的。重查顺带把"设备接受了哪个 decoder"也带回来（编码器必须跟解码器一致），
+  所以驱动不再需要自己 fold-in 那个字段。
 - 驱动侧接口：模块参数 `brightness=` / `rotation=` / `decoder=`（`-1` = 不动），
   probe 时由 `pud_push_params()` 下发并打日志
   （`params: asked 0x.., rejected 0x.. -> brightness ..%, rotation .., decoder ..`），
   有 rejected 位时再补一条 warning。`pud_set_params()` 对"固件没有这条命令"返回
   `-EOPNOTSUPP`（老固件回零长度包）。
-- 顺序注意：`pud_push_params()` 在 `pud_drm_alloc()` **之后**调用，因为 DRM mode 是在那里
-  按 caps 建的 —— 将来若真有运行期旋转，得把它挪到那之前才会影响本次启动的 mode。
 - 两边的结构体尺寸由 `_Static_assert` 钉住（固件 `usbd_vendor.c`、驱动 `pud.h`：
   8 / 12 字节，无 padding），用户态还有一份 `scripts/pud_usb.py` 的
   `PARAMS_STRUCT` / `PARAM_STATE_STRUCT` 与其逐字节一致。

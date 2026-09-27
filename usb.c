@@ -70,32 +70,43 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
  * plus struct pud_params; the answer comes back on EP2 like the other queries,
  * so `state` always describes the device rather than what was asked for.
  *
+ * Takes a usb_device rather than a struct pud, exactly like pud_query_caps():
+ * this runs before the display device exists (a rotation changes the frame the
+ * panel is driven in, and the mode has to be built from the report that follows
+ * it), so it brings its own temporary struct for ctrl_buf.
+ *
  * Returns 0 and fills `state`, -EOPNOTSUPP when the firmware has no such
  * command (it answers the query with a zero-length packet), or any errno from
  * the transfers.
  */
-static int pud_set_params(struct pud *pud, const struct pud_params *params,
+static int pud_set_params(struct usb_device *udev,
+                          const struct pud_params *params,
                           struct pud_param_state *state)
 {
+	struct pud *tmp;
 	int rc;
 	size_t len = PUD_REQ_HEADER_SIZE + sizeof(*params);
 
-	if (len > sizeof(pud->ctrl_buf) ||
-	    sizeof(*state) > sizeof(pud->ctrl_buf))
+	if (len > sizeof(tmp->ctrl_buf) || sizeof(*state) > sizeof(tmp->ctrl_buf))
 		return -EINVAL;
 
-	memset(pud->ctrl_buf, 0, len);
-	pud->ctrl_buf[0] = PUD_CMD_SET_PARAM & 0xff;
-	pud->ctrl_buf[1] = (PUD_CMD_SET_PARAM >> 8) & 0xff;
-	pud->ctrl_buf[2] = sizeof(*params) & 0xff;
-	pud->ctrl_buf[3] = (sizeof(*params) >> 8) & 0xff;
-	memcpy(&pud->ctrl_buf[PUD_REQ_HEADER_SIZE], params, sizeof(*params));
+	tmp = kzalloc(sizeof(*tmp), GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+	tmp->udev = udev;
 
-	rc = usb_control_msg(pud->udev, usb_sndctrlpipe(pud->udev, EP0_OUT_ADDR),
+	memset(tmp->ctrl_buf, 0, len);
+	tmp->ctrl_buf[0] = PUD_CMD_SET_PARAM & 0xff;
+	tmp->ctrl_buf[1] = (PUD_CMD_SET_PARAM >> 8) & 0xff;
+	tmp->ctrl_buf[2] = sizeof(*params) & 0xff;
+	tmp->ctrl_buf[3] = (sizeof(*params) >> 8) & 0xff;
+	memcpy(&tmp->ctrl_buf[PUD_REQ_HEADER_SIZE], params, sizeof(*params));
+
+	rc = usb_control_msg(udev, usb_sndctrlpipe(udev, EP0_OUT_ADDR),
 	                     REQ_SET_PARAM, TYPE_VENDOR | USB_DIR_OUT, 0, 0,
-	                     pud->ctrl_buf, len, PUD_DEFAULT_TIMEOUT);
+	                     tmp->ctrl_buf, len, PUD_DEFAULT_TIMEOUT);
 	if (rc < 0)
-		return rc;
+		goto out;
 
 	/* The answer is read into ctrl_buf, not into the caller's `state`: the
 	 * buffer handed to usb_bulk_msg() has to be DMA-mappable, and the caller
@@ -103,21 +114,26 @@ static int pud_set_params(struct pud *pud, const struct pud_params *params,
 	 * USB core WARN "transfer buffer is on stack" and refuses the transfer).
 	 * The command header ctrl_buf holds was already sent by the transfer
 	 * above, so overwriting it here is fine. */
-	rc = pud_transfer(pud, PUD_CMD_GET_PARAM, REQ_EP2_IN, EP2_IN_ADDR,
-	                  pud->ctrl_buf, sizeof(*state));
+	rc = pud_transfer(tmp, PUD_CMD_GET_PARAM, REQ_EP2_IN, EP2_IN_ADDR,
+	                  tmp->ctrl_buf, sizeof(*state));
 	if (rc < 0)
-		return rc;
-	if (rc < (int)sizeof(*state))
-		return -EOPNOTSUPP;
+		goto out;
+	if (rc < (int)sizeof(*state)) {
+		rc = -EOPNOTSUPP;
+		goto out;
+	}
 
-	memcpy(state, pud->ctrl_buf, sizeof(*state));
+	memcpy(state, tmp->ctrl_buf, sizeof(*state));
+	rc = 0;
 
-	return 0;
+out:
+	kfree(tmp);
+	return rc;
 }
 
-/* Defined next to the module parameters it reads; the two display backends call
- * it right after pud_apply_caps(). */
-static void pud_push_params(struct pud *pud);
+/* Defined next to the module parameters it reads; pud_probe() calls it right
+ * after the first capability query. */
+static bool pud_push_params(struct usb_device *udev, struct device *dev);
 
 /* ---------------------------------------------------------------------------
  * EP1 transfer, one of two implementations
@@ -594,12 +610,6 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 	pud->udev = udev;
 	pud->dev = dev;
 	pud_apply_caps(pud, caps, caps_len);
-	/* Sent after pud_drm_alloc(), which is where the mode is built from the
-	 * caps: a rotation the device accepted would have to be pushed before
-	 * that call to shape this boot's mode.  It is rejected today (the
-	 * firmware's rotation is a build-time choice), so the order only matters
-	 * for a future firmware. */
-	pud_push_params(pud);
 
 	usb_set_intfdata(intf, pud);
 
@@ -656,8 +666,9 @@ MODULE_PARM_DESC(brightness,
 static int rotation = -1;
 module_param(rotation, int, 0444);
 MODULE_PARM_DESC(rotation,
-                 "panel rotation 0..3 to request (-1 = leave it alone); a "
-                 "firmware with a build-time rotation rejects this");
+                 "panel rotation 0..3 to set at probe (-1 = leave it alone); "
+                 "the capability report is read again afterwards, because this "
+                 "one swaps the frame the panel is driven in");
 
 static int decoder = -1;
 module_param(decoder, int, 0444);
@@ -666,19 +677,21 @@ MODULE_PARM_DESC(decoder,
                  "the firmware picks it at build time");
 
 /*
- * Push whatever the command line asked for and fold the answer in: the device
- * says which fields it could not apply, and a field it *did* apply has to be
- * honoured here too (the decoder decides what this driver encodes -- pushing
- * QOI at a device that switched to RLE would only drop frames).
+ * Push whatever the command line asked for, before anything is sized from the
+ * device.  Returns true when a write went out, which is the caller's cue to read
+ * the capability report again: the device answers that from what it is doing
+ * now, so a rotation shows up as the swapped geometry the mode has to be built
+ * from (and a decoder it accepted as the decoder this driver has to encode
+ * with).  A field the device rejects is reported, never pretended.
  */
-static void pud_push_params(struct pud *pud)
+static bool pud_push_params(struct usb_device *udev, struct device *dev)
 {
 	struct pud_param_state state;
 	struct pud_params req = { 0 };
 	int rc;
 
 	if (brightness < 0 && rotation < 0 && decoder < 0)
-		return;
+		return false;
 
 	if (brightness >= 0) {
 		req.mask |= PUD_PARAM_BRIGHTNESS;
@@ -693,30 +706,27 @@ static void pud_push_params(struct pud *pud)
 		req.decoder = decoder;
 	}
 
-	rc = pud_set_params(pud, &req, &state);
+	rc = pud_set_params(udev, &req, &state);
 	if (rc == -EOPNOTSUPP) {
-		dev_warn(pud->dev,
-		         "firmware has no runtime parameters; %s ignored\n",
-		         "the command line settings");
-		return;
+		dev_warn(dev, "firmware has no runtime parameters; the command line settings are ignored\n");
+		return false;
 	}
 	if (rc) {
-		dev_warn(pud->dev, "could not set parameters: %d\n", rc);
-		return;
+		dev_warn(dev, "could not set parameters: %d\n", rc);
+		return false;
 	}
 
-	dev_info(pud->dev,
+	dev_info(dev,
 	         "params: asked 0x%x, rejected 0x%x -> brightness %u%%, rotation %u, decoder %u\n",
 	         req.mask, state.rejected, state.brightness, state.rotation,
 	         state.decoder);
 
 	if (state.rejected)
-		dev_warn(pud->dev,
-		         "device cannot change params 0x%x at runtime (build-time choice there)\n",
+		dev_warn(dev,
+		         "device cannot change params 0x%x at runtime (a build-time choice there)\n",
 		         state.rejected);
 
-	if ((req.mask & PUD_PARAM_DECODER) && !(state.rejected & PUD_PARAM_DECODER))
-		pud->decoder_type = state.decoder;
+	return true;
 }
 
 static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
@@ -749,6 +759,23 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		         "no capability report (%d), using defaults\n",
 		         caps_len);
 		caps_len = 0;
+	}
+
+	/* Parameters before the capability report is used, and the report read
+	 * again after them: a rotation swaps the frame the panel is driven in, so
+	 * everything below -- mode, encoder buffer, input axis ranges -- has to be
+	 * built from what the device says it is doing now, not from what it was
+	 * doing when we first asked.  Both backend setups take `caps` as it stands
+	 * here. */
+	if (pud_push_params(udev, &intf->dev)) {
+		int n = pud_query_caps(udev, caps);
+
+		if (n >= 0)
+			caps_len = n;
+		else
+			dev_warn(&intf->dev,
+			         "no capability report after setting parameters (%d)\n",
+			         n);
 	}
 
 	if (input_only) {
