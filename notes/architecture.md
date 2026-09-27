@@ -47,6 +47,16 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 | `report_mode` | `touch` | 输入设备注册成哪种：`touch`（默认）或 `pointer`（`input.c` 的 `module_param(report_mode)`），差别见下面"输入设备（EP4）"一节。 |
 | `initial_mode` | `0` | 从 probe 直接提交一次固定 mode，让**没有 userspace** 时面板也点亮（`drm.c:pud_drm_set_initial_mode()`）。默认关是有原因的：它把驱动放进"没人在环里"的发送路径，只有在固件**丢弃不可信 header 而不是 stall EP1** 之后才安全 —— 那种 stall 曾把宿主控制器卡到板子都重启不干净（见 [build-and-test.md](build-and-test.md) 的"真机对比结论"）。固件 2026-09 起已满足该条件，`initial_mode=1` 已真机验证。 |
 
+下面三个是**下发给设备**的运行期参数（`PUD_CMD_SET_PARAM`，probe 时由
+`pud_push_params()` 发送，`-1` = 不动那个字段；协议与"哪些字段固件改不了"见
+[usb-protocol.md](usb-protocol.md) 的"运行期参数"）：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `brightness` | `-1` | 背光百分比 0..100。**固件唯一能在运行期改的参数**；注意面板 profile 会在它之上再加自己的 offset（本构型 +5%，`pico-display-lib` 的 `bl_lvl_offs`），所以"设 10%"面板会比 10% 亮一点。 |
+| `rotation` | `-1` | 面板旋转 0..3。**当前固件会拒绝**（旋转是编译期选择，且 DRM mode 也由它推出来）：驱动原样上报 rejected，不改本机几何。真有运行期旋转时，`pud_push_params()` 还得挪到 `pud_drm_alloc()` 之前才能影响本次启动的 mode。 |
+| `decoder` | `-1` | 解码器类型 0..4（`DECODER_TYPE` 编号）。**当前固件会拒绝**（编译期选择）。若设备接受了，驱动会把 `pud->decoder_type` 跟着改 —— 编码器和解码器必须一致，否则只会丢帧。 |
+
 ## 输入设备（EP4）
 
 触摸在设备侧是**可选**的（`PUD_CAPS_TOUCH`）：多数板级配置没有控制器，那种固件

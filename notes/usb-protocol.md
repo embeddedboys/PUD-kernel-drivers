@@ -197,12 +197,56 @@ usb_bulk_msg(udev, usb_rcvbulkpipe(udev, EP2_IN_ADDR), data, len, &actual_length
 | --- | --- | --- |
 | `0x01` | `PUD_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 |
 | `0x02` | `PUD_CMD_GET_CAPS` | `struct pud_caps`（共 **32** 字节：前 16 是 magic / proto_ver / frame_max / decoder_type，其后是面板参数；老固件只回前 16 字节） |
+| `0x04` | `PUD_CMD_GET_PARAM` | `struct pud_param_state`（**12** 字节：`settable` / `rejected` + 四个当前值）—— 见下一节 |
 | 其他 | — | 固件回**零长度包**（主机读回短包 → 判定不支持） |
 
 驱动侧调用点（都在 `pud_probe()` 里，**顺序不要调换**）：`pud_query_caps()` 查能力报告，
 **在任何注册之前** —— DRM mode、`encoder_buf` 大小、fbdev 显存、输入设备轴范围都由它推出来
 （见 [architecture.md](architecture.md) 的"设备参数"）；`pud_read_unique_id()` 在注册显示设备
 之后，只把序列号打进 dmesg。
+
+## 数据通道 3：运行期参数（`REQ_SET_PARAM` / `PUD_CMD_GET_PARAM`）
+
+主机**向设备**写参数走控制端点（EP0），不新增端点：几个字节、很少改，而 EP0 是唯一一条
+"不用改配置描述符、也不跟 EP1 图像流抢带宽"的通道。**EP3 仍然没用**（固件里定义了号，
+但没进配置描述符），留给将来可能需要的 bulk 参数/配置通道。
+
+| 方向 | 请求 | 载荷 |
+| --- | --- | --- |
+| 写 | `REQ_SET_PARAM`(0x06)，控制 OUT | 4 字节命令头（`cmd=0x03` + size）+ `struct pud_params`(**8 B**) = **12 B** |
+| 读 | `REQ_EP2_IN`(0x03) + `cmd=0x04` | `struct pud_param_state`(**12 B**) |
+
+```c
+#define PUD_PARAM_BRIGHTNESS 0x00000001 /* u8, 0..100 百分比 */
+#define PUD_PARAM_ROTATION   0x00000002 /* 0..3，TFT_ROTATION 编号 */
+/* 0x00000004 已退休：它原来是 fps，而设备侧根本不控节奏（EP1 流控让主机等）。
+ * 位号不复用，理由与请求号一样：已经知道这个号的实现不能被静默改语义。 */
+#define PUD_PARAM_DECODER    0x00000008 /* DECODER_TYPE 编号 */
+
+struct pud_params { u32 mask; u8 brightness, rotation, reserved, decoder; };
+struct pud_param_state { u32 settable, rejected; u8 brightness, rotation, reserved, decoder; };
+```
+
+`reserved` 就是退休的 `fps` 占的那个字节：显式留着，结构体才还是 8 / 12 字节自然对齐、
+不引入隐式 padding。
+
+- 只有 `mask` 点到的字段被设置；写本身不回数据，**回读才知道生效了什么**。
+- 载荷太短/命令头不对 → 固件 stall（不应用一半）。
+- **被拒绝的字段要如实上报**：`rejected` 里给出这次没能应用的位。今天固件只能改
+  `brightness`（`settable = PUD_PARAM_BRIGHTNESS`）：`rotation` 与 `decoder` 是编译期
+  选择。**驱动不要假装成功** —— 只有没进 `rejected` 的字段才允许影响本机状态
+  （例如 decoder 决定了驱动用哪个编码器）。
+- 驱动侧接口：模块参数 `brightness=` / `rotation=` / `decoder=`（`-1` = 不动），
+  probe 时由 `pud_push_params()` 下发并打日志
+  （`params: asked 0x.., rejected 0x.. -> brightness ..%, rotation .., decoder ..`），
+  有 rejected 位时再补一条 warning。`pud_set_params()` 对"固件没有这条命令"返回
+  `-EOPNOTSUPP`（老固件回零长度包）。
+- 顺序注意：`pud_push_params()` 在 `pud_drm_alloc()` **之后**调用，因为 DRM mode 是在那里
+  按 caps 建的 —— 将来若真有运行期旋转，得把它挪到那之前才会影响本次启动的 mode。
+- 两边的结构体尺寸由 `_Static_assert` 钉住（固件 `usbd_vendor.c`、驱动 `pud.h`：
+  8 / 12 字节，无 padding），用户态还有一份 `scripts/pud_usb.py` 的
+  `PARAMS_STRUCT` / `PARAM_STATE_STRUCT` 与其逐字节一致。
+- 固件仓的对应章节：`Pico-USB-Display/notes/usb-protocol.md`（同一份契约，改了要两边一起改）。
 
 ### `PUD_CMD_GET_CAPS`：设备上报自己的传输上限
 

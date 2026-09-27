@@ -86,6 +86,44 @@ struct pud_ep1_header {
 
 #define PUD_CMD_GET_SN 0x01
 #define PUD_CMD_GET_CAPS 0x02
+#define PUD_CMD_SET_PARAM 0x03 /* control OUT (REQ_SET_PARAM), struct pud_params */
+#define PUD_CMD_GET_PARAM 0x04 /* EP2 IN, struct pud_param_state */
+
+/*
+ * Runtime parameters, protocol v2.  The host writes a mask plus the values it
+ * wants and reads back what is in effect; a field this firmware build cannot
+ * change (rotation and the decoder are chosen when the firmware is built) comes
+ * back in `rejected` instead of being pretended.  Must match the firmware's
+ * include/pud.h and the firmware repo's scripts/pud_usb.py byte for byte.
+ */
+#define PUD_PARAM_BRIGHTNESS 0x00000001 /* u8, 0..100 percent */
+#define PUD_PARAM_ROTATION 0x00000002 /* 0..3, TFT_ROTATION numbering */
+/* 0x00000004 is retired: it was `fps`, and the device does not pace frames --
+ * EP1 flow control makes the host wait instead.  The bit stays unused rather
+ * than being renumbered, so an implementation that already knows it is not
+ * silently given a new meaning. */
+#define PUD_PARAM_DECODER 0x00000008 /* DECODER_TYPE numbering */
+
+struct pud_params {
+	u32 mask; /* PUD_PARAM_*: which of the values below this write sets */
+	u8 brightness;
+	u8 rotation;
+	u8 reserved; /* retired `fps`: keeps the struct at 8 bytes, no padding */
+	u8 decoder;
+};
+
+struct pud_param_state {
+	u32 settable; /* PUD_PARAM_* this firmware can change at runtime */
+	u32 rejected; /* PUD_PARAM_* the last PUD_CMD_SET_PARAM could not apply */
+	u8 brightness; /* values in effect on the device */
+	u8 rotation;
+	u8 reserved;
+	u8 decoder;
+};
+
+/* Wire layouts shared with the firmware: no padding is allowed to creep in. */
+static_assert(sizeof(struct pud_params) == 8, "pud_params wire size");
+static_assert(sizeof(struct pud_param_state) == 12, "pud_param_state wire size");
 
 /* What the device decodes (firmware DECODER_TYPE, reported by PUD_CMD_GET_CAPS).
  * The numbers are a protocol field: do not renumber.  The driver picks its
@@ -164,6 +202,15 @@ struct pud_caps {
 #define REQ_EP1_OUT 0X02
 #define REQ_EP2_IN 0X03
 #define REQ_EP4_IN 0x05
+/* Runtime parameters ride EP0: a control OUT carrying the same 4-byte command
+ * header as the query path, followed by struct pud_params.  EP3 stays unused
+ * (the firmware defines the number but has not put it in its descriptor) and is
+ * reserved for a future bulk parameter/config channel. */
+#define REQ_SET_PARAM 0X06
+
+/* Command header in front of every vendor request (queries and parameters):
+ * u16 cmd, u16 size, little-endian. */
+#define PUD_REQ_HEADER_SIZE 4
 
 struct pud_display {
 	u32 xres;

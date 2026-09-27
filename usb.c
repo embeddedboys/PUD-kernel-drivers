@@ -64,6 +64,61 @@ static int pud_transfer(struct pud *pud, u8 cmd, u8 request, u8 addr, u8 *data,
 	return actual_length;
 }
 
+/*
+ * Runtime parameters: ask the device to change them, then read back what is in
+ * effect.  A control OUT carries the same command header the query path uses
+ * plus struct pud_params; the answer comes back on EP2 like the other queries,
+ * so `state` always describes the device rather than what was asked for.
+ *
+ * Returns 0 and fills `state`, -EOPNOTSUPP when the firmware has no such
+ * command (it answers the query with a zero-length packet), or any errno from
+ * the transfers.
+ */
+static int pud_set_params(struct pud *pud, const struct pud_params *params,
+                          struct pud_param_state *state)
+{
+	int rc;
+	size_t len = PUD_REQ_HEADER_SIZE + sizeof(*params);
+
+	if (len > sizeof(pud->ctrl_buf) ||
+	    sizeof(*state) > sizeof(pud->ctrl_buf))
+		return -EINVAL;
+
+	memset(pud->ctrl_buf, 0, len);
+	pud->ctrl_buf[0] = PUD_CMD_SET_PARAM & 0xff;
+	pud->ctrl_buf[1] = (PUD_CMD_SET_PARAM >> 8) & 0xff;
+	pud->ctrl_buf[2] = sizeof(*params) & 0xff;
+	pud->ctrl_buf[3] = (sizeof(*params) >> 8) & 0xff;
+	memcpy(&pud->ctrl_buf[PUD_REQ_HEADER_SIZE], params, sizeof(*params));
+
+	rc = usb_control_msg(pud->udev, usb_sndctrlpipe(pud->udev, EP0_OUT_ADDR),
+	                     REQ_SET_PARAM, TYPE_VENDOR | USB_DIR_OUT, 0, 0,
+	                     pud->ctrl_buf, len, PUD_DEFAULT_TIMEOUT);
+	if (rc < 0)
+		return rc;
+
+	/* The answer is read into ctrl_buf, not into the caller's `state`: the
+	 * buffer handed to usb_bulk_msg() has to be DMA-mappable, and the caller
+	 * passes a local one (AGENTS.md invariant 1 -- a stack buffer makes the
+	 * USB core WARN "transfer buffer is on stack" and refuses the transfer).
+	 * The command header ctrl_buf holds was already sent by the transfer
+	 * above, so overwriting it here is fine. */
+	rc = pud_transfer(pud, PUD_CMD_GET_PARAM, REQ_EP2_IN, EP2_IN_ADDR,
+	                  pud->ctrl_buf, sizeof(*state));
+	if (rc < 0)
+		return rc;
+	if (rc < (int)sizeof(*state))
+		return -EOPNOTSUPP;
+
+	memcpy(state, pud->ctrl_buf, sizeof(*state));
+
+	return 0;
+}
+
+/* Defined next to the module parameters it reads; the two display backends call
+ * it right after pud_apply_caps(). */
+static void pud_push_params(struct pud *pud);
+
 /* ---------------------------------------------------------------------------
  * EP1 transfer, one of two implementations
  *
@@ -478,6 +533,7 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	pud->dev = dev;
 	pud->info = info;
 	pud_apply_caps(pud, caps, caps_len);
+	pud_push_params(pud);
 
 	pud->encoder_buf = dma_alloc_coherent(
 	        pud->dev, info->var.xres * info->var.yres * 2,
@@ -539,6 +595,12 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 	pud->udev = udev;
 	pud->dev = dev;
 	pud_apply_caps(pud, caps, caps_len);
+	/* Sent after pud_drm_alloc(), which is where the mode is built from the
+	 * caps: a rotation the device accepted would have to be pushed before
+	 * that call to shape this boot's mode.  It is rejected today (the
+	 * firmware's rotation is a build-time choice), so the order only matters
+	 * for a future firmware. */
+	pud_push_params(pud);
 
 	usb_set_intfdata(intf, pud);
 
@@ -576,6 +638,87 @@ MODULE_PARM_DESC(input_only,
 #else
 #define input_only false
 #endif
+
+/*
+ * Runtime parameters pushed to the device at probe (-1 = leave that one alone).
+ *
+ * They go through PUD_CMD_SET_PARAM and the device answers which of them it
+ * could not apply, so asking for something this firmware cannot do is reported,
+ * not pretended: today that is everything except the backlight -- rotation and
+ * the decoder are chosen when the firmware is built.  (A frame-rate setting
+ * lived here for one revision and was dropped: the device does not pace frames
+ * at all, EP1 flow control on its side makes this host wait.)
+ */
+static int brightness = -1;
+module_param(brightness, int, 0444);
+MODULE_PARM_DESC(brightness,
+                 "backlight level 0..100 to set at probe (-1 = leave it alone)");
+
+static int rotation = -1;
+module_param(rotation, int, 0444);
+MODULE_PARM_DESC(rotation,
+                 "panel rotation 0..3 to request (-1 = leave it alone); a "
+                 "firmware with a build-time rotation rejects this");
+
+static int decoder = -1;
+module_param(decoder, int, 0444);
+MODULE_PARM_DESC(decoder,
+                 "decoder type 0..4 to request (-1 = leave alone); rejected: "
+                 "the firmware picks it at build time");
+
+/*
+ * Push whatever the command line asked for and fold the answer in: the device
+ * says which fields it could not apply, and a field it *did* apply has to be
+ * honoured here too (the decoder decides what this driver encodes -- pushing
+ * QOI at a device that switched to RLE would only drop frames).
+ */
+static void pud_push_params(struct pud *pud)
+{
+	struct pud_param_state state;
+	struct pud_params req = { 0 };
+	int rc;
+
+	if (brightness < 0 && rotation < 0 && decoder < 0)
+		return;
+
+	if (brightness >= 0) {
+		req.mask |= PUD_PARAM_BRIGHTNESS;
+		req.brightness = min(brightness, 100);
+	}
+	if (rotation >= 0) {
+		req.mask |= PUD_PARAM_ROTATION;
+		req.rotation = rotation & 3;
+	}
+	if (decoder >= 0) {
+		req.mask |= PUD_PARAM_DECODER;
+		req.decoder = decoder;
+	}
+
+	rc = pud_set_params(pud, &req, &state);
+	if (rc == -EOPNOTSUPP) {
+		dev_warn(pud->dev,
+		         "firmware has no runtime parameters; %s ignored\n",
+		         "the command line settings");
+		return;
+	}
+	if (rc) {
+		dev_warn(pud->dev, "could not set parameters: %d\n", rc);
+		return;
+	}
+
+	dev_info(pud->dev,
+	         "params: asked 0x%x, rejected 0x%x -> brightness %u%%, rotation %u, decoder %u\n",
+	         req.mask, state.rejected, state.brightness, state.rotation,
+	         state.decoder);
+
+	if (state.rejected)
+		dev_warn(pud->dev,
+		         "device cannot change params 0x%x at runtime (build-time choice there)\n",
+		         state.rejected);
+
+	if ((req.mask & PUD_PARAM_DECODER) && !(state.rejected & PUD_PARAM_DECODER))
+		pud->decoder_type = state.decoder;
+}
 
 static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
