@@ -732,10 +732,22 @@ static bool pud_push_params(struct usb_device *udev, struct device *dev)
 static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
+	const struct usb_host_interface *alt = intf->cur_altsetting;
 	struct pud_caps *caps;
 	struct pud *pud;
 	u8 *serial;
 	int caps_len, rc;
+
+	/* Only the vendor image interface is ours (0xff/0x00/0x00).  The device
+	 * has a second one -- picoboot's reset interface, 0xff/0x00/0x01, which
+	 * exists so picotool can reboot a running board into BOOTSEL -- and the
+	 * id_table above should already keep it from being probed; this is the
+	 * second line of defence, because everything below assumes it was handed
+	 * the interface whose endpoints this driver talks to (the EP*_ADDR
+	 * constants, not a descriptor lookup). */
+	if (alt->desc.bInterfaceClass != USB_CLASS_VENDOR_SPEC ||
+	    alt->desc.bInterfaceSubClass != 0 || alt->desc.bInterfaceProtocol != 0)
+		return -ENODEV;
 
 	/* Which EP1 path this build carries -- the two differ exactly where the
 	 * "host controller wedged, transfer never returns" failure shows up. */
@@ -875,7 +887,19 @@ static void pud_shutdown(struct usb_interface *intf)
 }
 
 static struct usb_device_id pud_ids[] = {
-	{ USB_DEVICE(0x2E8A, 0x0001) },
+	/* Interface 0 only.  The firmware also exposes picoboot's reset
+	 * interface (class 0xff, subclass 0, protocol 1, no endpoints -- see its
+	 * usbd_vendor.h), and a plain USB_DEVICE() match is device-wide: the USB
+	 * core calls probe() once per interface that matches, so that interface
+	 * would be probed as well.  Nothing in this driver would notice the
+	 * mistake -- the endpoint addresses are the fixed EP1_OUT_ADDR/EP2_IN_ADDR
+	 * /EP4_IN_ADDR constants, not looked up in the descriptor -- and it would
+	 * publish a second display for a panel that is already being driven.
+	 * Matching the interface class/subclass/protocol keeps the reset interface
+	 * (protocol 1) out, and the check at the top of pud_probe() is the second
+	 * line of defence. */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x2E8A, 0x0001, USB_CLASS_VENDOR_SPEC, 0x00,
+	                                0x00) },
 	{ /* KEEP THIS */ },
 };
 MODULE_DEVICE_TABLE(usb, pud_ids);

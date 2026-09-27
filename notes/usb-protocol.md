@@ -9,9 +9,21 @@
 | --- | --- | --- |
 | VID:PID | `0x2E8A:0x0001` | `usb.c` 的 `pud_ids[]`；固件 `usbd_vendor.h` 的 `VENDOR_ID`/`PRODUCT_ID` |
 | 接口类 | `0xFF`（vendor specific），子类/协议 `0` | 固件 `config_descriptor[]` |
-| 端点数量 | 3 | 同上 |
+| 接口数量 | **2**（接口 0 是我们用的那个：3 个端点、`0xFF/0x00/0x00`；接口 1 是 picoboot 的 reset 接口：`0xFF/0x00/0x01`、**0 端点**） | 同上 |
+| 端点数量 | 3（全在接口 0 上） | 同上 |
 | 供电 | bus powered，`USBD_MAX_POWER 500` | 同上 |
 | 速率 | **Full-Speed**（批量端点 MPS = 64） | 板上 `dmesg` 实测："new full-speed USB device" |
+
+> 接口 1（2026-09-27 加入）与这份协议**无关**：它是 Raspberry Pi 的 picoboot reset 接口
+> （类/子类/协议 `0xFF/0x00/0x01`，EP0 请求 `0x01` = 重启进 BOOTSEL、`0x02` = 重启回应用），
+> 让 `picotool` 能在**应用态**把板子送进 BOOTSEL，不必按按钮或接调试器。
+> **驱动要躲开它**：这个接口的类码也是 `0xff`/子类 `0`，而 `pud_ids[]` 原来的
+> `USB_DEVICE(0x2E8A, 0x0001)` 是**设备级**匹配 —— USB 核会为**每个**匹配到的接口各调一次
+> `probe()`，而本驱动的端点地址是写死的常量（`EP1_OUT_ADDR` 等，不查描述符），所以拿错
+> 接口也不会失败，只会**给同一块屏再注册一个显示设备**。现在 `pud_ids[]` 用
+> `USB_DEVICE_AND_INTERFACE_INFO(0x2E8A, 0x0001, 0xff, 0x00, 0x00)`（只匹配图像接口），
+> `pud_probe()` 顶上另有一道 `bInterfaceProtocol != 0 → -ENODEV` 的闸。
+> 设备侧的细节见固件仓 `Pico-USB-Display/notes/usb-protocol.md`。
 
 > 注意：驱动侧并没有把 Pico 当成高速设备。若要改高速，`USB_TRANS_MAX_SIZE`、分带尺寸、
 > 固件缓冲尺寸都要重新评估。

@@ -287,7 +287,29 @@ fbcon 不接管，dmesg 里只有一条 `WARNING`。移植时代码能编过、p
 构建 6.1.172 时需要用 `KERN_OBJ_DIR` 指向 objtree，而不是去 `KERN_DIR` 里补文件。
 **`KERN_DIR` 只读**。
 
-### 4.4 7.0：`insmod` 报 `Unknown symbol in module`
+### 4.4 固件多一个接口，驱动就多注册一个显示设备
+
+`pud_ids[]` 原来是设备级的 `USB_DEVICE(0x2E8A, 0x0001)`。USB 核**按接口**匹配
+`struct usb_driver`：一个设备级 id 会让**每个**接口都匹配上，`probe()` 于是被调用多次。
+本驱动的端点地址是写死的常量（`EP1_OUT_ADDR` 等，不查描述符），所以第二次 probe 不会失败 ——
+固件加上 picoboot 的 reset 接口（`0xff/0x00/0x01`、无端点，为的是让 picotool 能在应用态把板子
+送进 BOOTSEL）之后，实测（`make qemu`，同一个固件，只换驱动）：
+
+| | 绑定的接口 | DRM | fb | `Initialized pud-drm` |
+| --- | --- | --- | --- | --- |
+| 设备级 id（旧） | `1-1:1.0` **+ `1-1:1.1`** | card0 **+ card1** | fb0 **+ fb1** | **2** 次 |
+| 接口级 id（现在） | `1-1:1.0` | card0 | fb0 | 1 次 |
+
+第二次 probe 只在注册输入设备时才报错（`device has no interrupt IN endpoint`，因为
+`pud_input_setup()` 会查 EP4），DRM/fbdev 两个都注册成功了 —— 也就是**同一块屏被两个 card
+驱动**，谁都不知道对方在写。
+
+修法两道：`USB_DEVICE_AND_INTERFACE_INFO(0x2E8A, 0x0001, 0xff, 0x00, 0x00)`（只匹配图像接口，
+reset 接口的 protocol 是 1，天然被排除），以及 `pud_probe()` 入口的
+`bInterfaceProtocol != 0 → -ENODEV`（万一以后固件再加接口）。
+**加接口 / 改接口类码时，这两个地方要一起看。**
+
+### 4.5 7.0：`insmod` 报 `Unknown symbol in module`
 
 7.0 的 fbdev 客户端在 drm 核心里，模块引用的 `drm_fbdev_dma_driver_fbdev_probe` 与
 `drm_client_setup` 都出自 `drm.ko`，而 `modinfo` 的 `depends:` 只写着 `drm_dma_helper`：
@@ -303,7 +325,7 @@ insmod: ERROR: could not insert module pud.ko: Unknown symbol in module
 只看 `insmod` 的错误看不出是哪个符号，`dmesg` 里才有：
 `pud: Unknown symbol drm_fbdev_dma_driver_fbdev_probe (err -2)`。
 
-### 4.5 `initial_mode=1` 之后卸载卡死（**未定位**）
+### 4.6 `initial_mode=1` 之后卸载卡死（**未定位**）
 
 `insmod pud.ko initial_mode=1` 之后再卸载，会卡在 `pud_drm_unregister` 里：
 
