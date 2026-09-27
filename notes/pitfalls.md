@@ -116,7 +116,9 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 | 位置 | 通道 | buffer | 结论 |
 | --- | --- | --- | --- |
 | `pud_transfer()` EP0 | control OUT | `pud->ctrl_buf`（嵌在 `struct pud`，`devm_drm_dev_alloc` → 堆） | ✅ |
-| `pud_transfer()` EP2 | bulk IN | 调用者传入（`pud_read_unique_id` → `kzalloc(8)`） | ✅ |
+| `pud_transfer()` EP2 | bulk IN | 调用者传入（`pud_read_unique_id` → `kzalloc(8)`；`pud_query_caps` → 调用者的 `kzalloc`） | ✅ |
+| `pud_set_params()` EP0 | control OUT | `pud->ctrl_buf`（命令头 + `struct pud_params`） | ✅ |
+| `pud_set_params()` EP2 | bulk IN | **`pud->ctrl_buf`**（回读 `struct pud_param_state`，再 memcpy 给调用者） | ✅ |
 | `pud_flush()` EP1（同步） | bulk OUT（`usb_sg_init`） | `pud->bulk_sgt.sgl` → `dma_alloc_coherent` 的页 | ✅ |
 | `pud_flush()` EP1（异步） | bulk OUT（`usb_submit_urb`） | `pud->encoder_buf`，`transfer_dma = encoder_dma` + `URB_NO_TRANSFER_DMA_MAP` | ✅ |
 | `input.c` 触摸 | int IN（`usb_fill_int_urb`） | `pud->ep_int_buf` = `kzalloc` | ✅ |
@@ -124,6 +126,12 @@ if (dev_WARN_ONCE(dev, is_vmalloc_addr(ptr),
 > 这张表里曾有一行 `REQ_EP4_IN`(0x05) 控制传输：那个轮询式取触摸的做法已经删掉
 > （现在是设备主动推送，见 [usb-protocol.md](usb-protocol.md) 的 EP4 一节），
 > 代码里只剩 `pud.h` 的宏定义。
+>
+> `pud_set_params()` 那两行是后加的，**加的时候正好踩了这条**：第一版把回读的目标
+> 写成调用者栈上的 `struct pud_param_state`，实机 `insmod` 立刻
+> `WARN ... transfer buffer is on stack`（`usb_hcd_submit_urb`），那笔读取也被拒
+> （`-EAGAIN`），参数于是没生效。新加"查询类"命令时，**回读缓冲必须用 `ctrl_buf`
+> 或 `kzalloc`**，栈上的只允许当 memcpy 的目标。
 
 **容易误判的一处**：同步路径（`PUD_USB_ASYNC=0`）的 `pud_flush()` 里
 
@@ -349,3 +357,57 @@ pud 1-4:1.0: [drm] fb1: pud-drmdrmfb frame buffer device
 客户机里做过真设备直通，客户机断电时留下一笔在飞的 EP1（`EP1 transfer failed (-108)` 那条），
 设备很可能停在"等一个永远收不完的传输"的状态上；同一份 `pud.ko`、同一个内核在客户机里
 是完整跑通的，所以不像驱动/内核的问题。下次再遇到，先复位设备再查驱动。
+
+### 5.2 EP1 超时能把 xHCI 控制器整个拖死（设备复位救不了，要重启或 unbind/bind）
+
+同一台机器、同一个内核（7.2.7-1-cachyos），本机加载驱动 + 让桌面**镜像**到面板（持续推流）
+跑了约 10 分钟之后：
+
+```
+00:54:44  xhci_hcd 0000:05:00.3: xHCI host not responding to stop endpoint command
+00:54:44  xhci_hcd 0000:05:00.3: xHCI host controller not responding, assume dead
+00:54:44  xhci_hcd 0000:05:00.3: HC died; cleaning up
+00:54:44  usb 1-3: USB disconnect, device number 2          ← 同一控制器上别的设备也掉
+00:54:44  pud 1-4:1.0: EP1 transfer failed (-110) for 480x22+0+44, 2814 bytes
+00:54:44  usb 1-4: USB disconnect, device number 5
+00:54:44  pud_drm_cleanup → pud_drm_unregister → pud_crtc_atomic_disable
+```
+
+要点：
+
+- **死之前只有这一笔失败**：`-110` 是传输超时（不是 §5.1 的 stall `-71`），带是 `480x22`
+  —— 也就是 caps 推出的 10913 px 预算、不是兜底值，所以驱动侧算得没错。链条是
+  "设备收不动 → 传输超时 → 主机对端点下 stop 命令得不到响应 → 内核判定控制器死亡"。
+  这与 AGENTS.md"板子上的工作方式"第 7 条描述的是同一个模式，只是更重：不只是卡住，
+  是控制器整个掉了。
+- **影响面是一整个控制器**：`0000:05:00.3` 上的设备全掉（面板 `1-4` 和摄像头 `1-3`），
+  而且不会自己回来；`pud` 的 disconnect 路径本身是干净跑完的（`pud_drm_unregister` →
+  `pud_crtc_atomic_disable`）。旁证：死亡前 1 分钟 dmesg 里有一串
+  `pud-drm: pud_crtc_mode_valid`，但**不能**由此断定因果 —— 那只是合成器在频繁探 mode，
+  是正常调用。这条打印后来从 `pr_info` 降成 `drm_dbg_kms`（默认不再刷屏；要看就开 DRM
+  debug），所以现在的日志里看不到它了。
+- **恢复**：重启最干净。不想重启就 unbind/bind 那个 PCI 设备 —— **这次实测有效、没有重启**
+  （`uptime` 仍显示 1h33m，两个 xhci 控制器都在、`1-3`/`1-4` 都重新枚举回来）。
+  [`scripts/pud-load.sh`](../scripts/pud-load.sh) 把这一套做成了命令：`recover` 自己找死掉的
+  控制器并 unbind/bind，`load` 在加载前也会自动做一次（控制器不在的时候面板根本不在总线上，
+  先加载没有意义）：
+
+  ```bash
+  scripts/pud-load.sh recover                     # 自动找出并救回
+  # 手工版本（仓库不在手边时）：
+  sudo rmmod pud                                  # 或 scripts/pud-load.sh unload --stop-dm
+  echo 0000:05:00.3 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind
+  echo 0000:05:00.3 | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind
+  ```
+
+  **判据**：控制器被清理之后，root hub（`usbN`）不再挂在 PCI 设备下面，而 PCI 设备仍然绑着
+  `xhci_hcd` —— 所以"绑着 xhci_hcd 却没有 `usbN` 子节点"就是死的。脚本里这一句必须用
+  `compgen -G "$d/usb*"` 这类写法，**不能**写 `[ -e "$d"/usb* ]`：USB3 控制器有两个 root hub
+  （`usb1 usb2`），`[ -e ]` 拿到两个展开路径会报错、按失败算 —— 于是**健康的控制器全被误判成
+  死的**，每次 `load` 都会去重绑一遍（写这个脚本时真踩了，已修）。
+
+  绑回来还是"不响应"就别再反复试探了（那是硬件/固件级僵死），只能重启。
+- **结论**：显示类测试继续走客户机（`make qemu`，见 [build-and-test.md](build-and-test.md)
+  C/D 节），本机最多 `scripts/pud-load.sh load input_only=1`（没有 DRM 节点就没有 EP1 流量）。
+  **"桌面镜像到面板"这种持续高负载推流是最容易触发它的用法** —— §5.1 的复位只能救回设备，
+  救不回控制器。
