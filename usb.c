@@ -533,7 +533,6 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	pud->dev = dev;
 	pud->info = info;
 	pud_apply_caps(pud, caps, caps_len);
-	pud_push_params(pud);
 
 	pud->encoder_buf = dma_alloc_coherent(
 	        pud->dev, info->var.xres * info->var.yres * 2,

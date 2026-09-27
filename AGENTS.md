@@ -132,7 +132,8 @@
   gdb 连 `localhost:3333` 即可，命令完全相同。注意 openocd 0.12 把两个核当 **SMP 组**，
   `resume` 前必须先把两个核都 `halt`（否则 resume 失败并把核留在停机状态）；细节见
   固件仓 `Pico-USB-Display/notes/debugging.md` 的"halt/resume 的坑"。
-- **不加载驱动也能测全部功能**：用固件仓的 `scripts/`（用户空间 pyusb）。
+- **不加载驱动也能测全部功能**：用固件仓的 `tools/`（工具，pyusb 直连）与 `tests/`
+  （验证脚本，跑一遍给对/错）。
 
 ## 板子上的工作方式（省时间，都是踩过的坑）
 
