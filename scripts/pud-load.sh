@@ -8,10 +8,18 @@
 #   scripts/pud-load.sh unload [--stop-dm]
 #   scripts/pud-load.sh reload [--stop-dm] [module options...]
 #   scripts/pud-load.sh status
+#   scripts/pud-load.sh recover
 #
 # --stop-dm stops the running display manager (gdm, lightdm, sddm, ...; found by
 # asking systemd, PUD_DM=<unit> overrides) around the unload.  Only needed when
 # a session holds the DRM node open; the older --stop-gdm spelling still works.
+#
+# recover brings back an xHCI controller the kernel gave up on ("HC died;
+# cleaning up" -- a wedged EP1 transfer can do that, notes/pitfalls.md 5.2) by
+# unbinding and rebinding its PCI device; `load` does the same by itself when it
+# finds one, because while the controller is gone the panel is simply not on the
+# bus.  A panel left stalled by an earlier session is a different failure and
+# needs a reset of the Pico (notes/pitfalls.md 5.1).
 #
 # Module options worth knowing (see notes/architecture.md):
 #   input_only=1          register only the touch input device, no DRM/fbdev
@@ -60,6 +68,88 @@ holders() {
     fi
 }
 
+# The panel identifies itself by vendor:product; matching both keeps the other
+# 2e8a devices (a Pico in BOOTSEL, a debug probe) out of it.  sysfs, so no
+# lsusb run -- that one hangs when the USB stack is wedged, which is exactly the
+# state this script has to work in.
+PANEL_VENDOR=2e8a
+PANEL_PRODUCT=0001
+
+panel_dev() {
+    local d
+    for d in /sys/bus/usb/devices/*/; do
+        [ -e "${d}idVendor" ] || continue
+        if [ "$(cat "${d}idVendor")" = "$PANEL_VENDOR" ] &&
+           [ "$(cat "${d}idProduct" 2>/dev/null)" = "$PANEL_PRODUCT" ]; then
+            basename "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+panel_present() { panel_dev >/dev/null; }
+
+# A live HCD hangs its root hub (usbN) off the PCI device.  When the kernel
+# declares the controller dead it cleans the HCD up -- root hub included -- while
+# the PCI device stays bound, so "bound to xhci_hcd but no usbN" is the tell.
+# compgen -G, not [ -e "$d"/usb* ]: a USB3 controller has two root hubs, and
+# [ -e ] with two expanded paths is an error that reads as "no match" -- which
+# would declare every healthy controller dead.
+xhci_alive() { compgen -G "$1/usb*" >/dev/null; }
+
+dead_xhci() {
+    local d
+    for d in /sys/bus/pci/drivers/xhci_hcd/0000:*; do
+        [ -e "$d" ] || continue
+        xhci_alive "$d" && continue
+        basename "$(readlink -f "$d")"
+    done
+}
+
+# Reboot is the clean fix for a dead controller, but unbinding and rebinding the
+# PCI device works too (measured) and keeps the machine usable.  If it stays
+# silent after that, only a reboot helps -- do not sit here retrying.
+do_recover() {
+    local d devs rc=0 book
+
+    devs=$(dead_xhci)
+    if [ -z "$devs" ]; then
+        say "no dead xHCI controller found"
+    else
+        for d in $devs; do
+            say "xHCI $d has no root hub -- the kernel declared it dead"
+            if ! echo "$d" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null; then
+                say "  unbind failed -- reboot to get this controller back"
+                rc=1
+                continue
+            fi
+            sleep 1
+            if ! echo "$d" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null; then
+                say "  bind failed -- reboot to get this controller back"
+                rc=1
+                continue
+            fi
+            sleep 3
+            if xhci_alive "/sys/bus/pci/drivers/xhci_hcd/$d"; then
+                say "  $d is back"
+            else
+                say "  $d still has no root hub -- reboot to get it back"
+                rc=1
+            fi
+        done
+    fi
+
+    say "--- panel ---"
+    if book=$(panel_dev); then
+        say "  on the bus as $book"
+    else
+        say "  not on the bus.  If it is plugged in and still missing, the Pico"
+        say "  itself may be stuck: reset it (notes/pitfalls.md 5.1)."
+    fi
+    return "$rc"
+}
+
 # The .ko has to be built for the running kernel, or insmod fails with
 # "disagrees about version of symbol module_layout" (this is what the old
 # hand-copied md5 check was protecting against, except it also caught a stale
@@ -89,6 +179,15 @@ do_load() {
         say "${MODULE} is already loaded (refcnt $(refcnt))"
         say "use '$0 reload' to pick up a new .ko, or '$0 unload' first"
         return 0
+    fi
+
+    # While a controller is dead the panel is not on the bus at all, so bring it
+    # back first rather than loading into nothing.  Read-only check unless there
+    # is something to fix.
+    if [ -n "$(dead_xhci)" ]; then
+        say "an xHCI controller is dead -- recovering it before loading"
+        do_recover
+        say ""
     fi
 
     # insmod resolves nothing: the module's own dependencies have to be loaded
@@ -203,7 +302,7 @@ do_status() {
             found=1
         fi
     done
-    [ "$found" -eq 1 ] || say "  (none -- loaded with input_only=1?)"
+    [ "$found" -eq 1 ] || say "  (none -- input_only=1, or the device never answered: see the dmesg below, then notes/pitfalls.md 5.1)"
 
     say "--- input device ---"
     if grep -q "pud touch panel" /proc/bus/input/devices 2>/dev/null; then
@@ -233,6 +332,7 @@ case "$cmd" in
         do_load "$@"
         ;;
     status) do_status ;;
+    recover) do_recover ;;
     ""|-h|--help|help) usage ;;
-    *) die "unknown command '$cmd' (load | unload | reload | status)" ;;
+    *) die "unknown command '$cmd' (load | unload | reload | status | recover)" ;;
 esac

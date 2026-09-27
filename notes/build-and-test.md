@@ -258,6 +258,12 @@ pud-drmdrmfb`，写 64 KB 到 `/dev/fb0` 返回成功，**面板上真的出现�
   `-ESHUTDOWN` 直接跳过（与 EP4 重提交路径忽略的三个状态一致），所以再跑不会再有
   "clearing the halt" 那一行；真正的 stall（`-EPIPE` 等）照旧清 halt。
 
+**本机直接 `insmod` 这条路也实测过，别照做**：加载本身正常（caps 拿到、`fb1 = pud-drmdrmfb`、
+桌面镜像到面板可用），但持续推流约 10 分钟之后把 **xHCI 控制器整个拖死**
+（`HC died; cleaning up`，该控制器上的面板和摄像头一起掉线），恢复要靠 unbind/bind 或重启 ——
+完整日志与恢复步骤见 [pitfalls.md](pitfalls.md) §5.2。显示类验证继续用客户机；
+本机最多 `scripts/pud-load.sh load input_only=1`（没有 DRM 节点就没有 EP1 流量）。
+
 C 节那套 `make qemu` 在 CachyOS 上要额外满足四个条件，都是实测出来的（2026-09）：
 
 | 条件 | 为什么 / 怎么做 |
@@ -300,9 +306,10 @@ ssh <board>
   scripts/pud-load.sh unload                   # 被桌面占住时会告诉你重新用 --stop-dm
   scripts/pud-load.sh unload --stop-dm         # 停显示管理器 → rmmod → 起回来
   scripts/pud-load.sh reload input_only=1      # 换参数/换 .ko 时用
+  scripts/pud-load.sh recover                  # 控制器被内核判死时把它 unbind/bind 回来
 ```
 
-它替你做掉三件以前靠人记的事：
+它替你做掉四件以前靠人记的事：
 
 1. **vermagic 校验**：`modinfo -F vermagic` 必须等于 `uname -r`，否则直接拒绝加载并说明
    原因 —— 这代替了以前"人工对 md5"，而且能同时抓住"传了旧 `.ko`"和"编错了内核"两类事故（
@@ -316,6 +323,12 @@ ssh <board>
 3. **依赖先加载**：`insmod` 自己不会解析依赖，而 7.0 把 fbdev 客户端放进了 drm 核心、
    DMA helper 放在 `drm_dma_helper` —— 脚本按 `modinfo -F depends` 先 `modprobe -a`。
    漏掉这一步就是 `Unknown symbol in module`（见 [pitfalls.md](pitfalls.md) 4.4）。
+4. **控制器死了自动救回**：`recover` 找出"绑着 `xhci_hcd` 却没有 root hub"的 PCI 设备
+   （内核把它判死之后会连 root hub 一起清理），`unbind` + `bind` 一遍；**`load` 也会在
+   加载前自动做一次**，因为控制器不在的时候面板根本不在总线上。判据、现场日志和
+   "为什么不是 `[ -e "$d"/usb* ]`"（USB3 控制器有两个 root hub，那个写法会把健康控制器
+   误判成死的）都在 [pitfalls.md](pitfalls.md) §5.2。设备本身卡住（caps `-71`）是另一回事，
+   那个要复位 Pico，脚本只会在 `recover` 末尾提示。
 
 `PUD_KO=/path/to/pud.ko` 可以指定别的模块（默认为仓库根的 `./pud.ko`），
 `MODULE=` 可以换模块名。工具只依赖 `kmod`/`lsof`/`systemctl`，不带任何本机路径。
