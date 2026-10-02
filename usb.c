@@ -689,7 +689,17 @@ static void pud_shutdown(struct usb_interface *intf)
 }
 
 static struct usb_device_id pud_ids[] = {
-	{ USB_DEVICE(0x2E8A, 0x0001) },
+	/*
+	 * Interface 0 only.  USB_DEVICE() matches every interface of the device,
+	 * and the firmware now exposes a second, endpoint-less one (the picoboot
+	 * reset interface, class 0xff proto 1) -- so the probe ran twice and
+	 * registered a second DRM card that can never enable, whose encoder still
+	 * sends on the same EP1.  Seen in QEMU as card0-USB-1 enabled and
+	 * card1-USB-2 disabled, with frames from both instances reaching the
+	 * device.  Interface 0 has carried the image endpoints since the first
+	 * firmware, so matching it by number keeps older devices working.
+	 */
+	{ USB_DEVICE_INTERFACE_NUMBER(0x2E8A, 0x0001, 0) },
 	{ /* KEEP THIS */ },
 };
 MODULE_DEVICE_TABLE(usb, pud_ids);
