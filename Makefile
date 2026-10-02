@@ -52,8 +52,16 @@ host_elf := $(strip $(if $(filter aarch64,$(host_machine)),b700, \
             $(if $(filter armv6l armv7l,$(host_machine)),2800, \
             $(if $(filter riscv64,$(host_machine)),f300,)))))
 
-tools_elf := $(strip $(shell od -An -tx1 -j18 -N2 $(KERN_DIR)/scripts/basic/fixdep 2>/dev/null | tr -d ' '))
-kernel_release := $(shell cat $(KERN_DIR)/include/config/kernel.release 2>/dev/null || uname -r)
+# Where kbuild keeps what it generated.  With O= that is the objtree, and it is
+# also where the host tools were built; a pristine vendor *source* tree has
+# neither.  Reading them from KERN_DIR would find nothing there, which looks
+# exactly like "the tools are foreign" and sends a cross build down the
+# on-the-board path below -- under the wrong kernel release, because the
+# fallback is uname -r.
+KERN_GEN := $(if $(KERN_OBJ_DIR),$(KERN_OBJ_DIR),$(KERN_DIR))
+
+tools_elf := $(strip $(shell od -An -tx1 -j18 -N2 $(KERN_GEN)/scripts/basic/fixdep 2>/dev/null | tr -d ' '))
+kernel_release := $(shell cat $(KERN_GEN)/include/config/kernel.release 2>/dev/null || uname -r)
 NATIVE_KERN_DIR := $(HOME)/.cache/pud-kbuild/$(kernel_release)
 # KERN_DIR is usually /lib/modules/$(uname -r)/build, i.e. a symlink; copying it
 # has to resolve to the real tree or we would be writing through the link.
