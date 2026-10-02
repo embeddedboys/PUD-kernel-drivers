@@ -1,7 +1,15 @@
 # USB 厂商协议（权威定义）
 
 > 这是**主机（驱动）↔ 设备（Pico 固件）之间唯一的接口约定**。
-> 固件侧的镜像说明见 `Pico-USB-Display/notes/usb-protocol.md`；两边必须保持一致。
+> 固件侧镜像见 `Pico-USB-Display/notes/usb-protocol.md`；两边必须保持一致。
+
+## TL;DR
+
+- 协议版本 `PUD_PROTO_VER = 2`：EP1 一次 bulk 传完 `12 B header + 压缩载荷`，**没有窗口协商控制请求**。
+- 枚举：VID:PID `0x2E8A:0x0001`，vendor-specific，Full-Speed（批量 MPS 64）；驱动只匹配**接口 0**。
+- 数据通道：EP1 OUT=图像流，EP2 IN=查询响应，EP4 IN=触摸主动推送；EP3 固件已定义但未实现。
+- 所有多字节字段**小端**；`bmRequestType` 固定 `TYPE_VENDOR | USB_DIR_OUT = 0x40`。
+- 分带上限由设备 `PUD_CMD_GET_CAPS` 上报，不是主机常量；改字段必须两仓同步。
 
 ## 枚举信息
 
@@ -60,7 +68,7 @@
   `pointer` 用 `BTN_LEFT`/`BTN_RIGHT` + `ABS_X/Y`，不建 MT、不置 `DIRECT`。
   （板上实测：ABS 位图含 MT_SLOT/POSITION_X/POSITION_Y/TRACKING_ID；KEY 位图含 `BTN_TOUCH`。）
 - 只测触摸时用 `insmod pud.ko input_only=1`（不注册 DRM/fbdev，`rmmod` 随时能卸），
-  见 [architecture.md](architecture.md)。
+  见 [input-touch.md](input-touch.md)。
 
 ## 请求号
 
@@ -75,6 +83,7 @@ REQ_EP2_IN  = 0x03      REQ_EP3_OUT = 0x04      REQ_EP4_IN = 0x05
 驱动的 `bmRequestType` 固定为 `TYPE_VENDOR | USB_DIR_OUT` = `0x40`（厂商请求、主机→设备、设备接收者）。
 
 > 驱动里 `REQ_EP0_OUT` / `REQ_EP0_IN` 只是照抄固件定义，**没有任何调用点**（死代码）。
+> `REQ_EP3_OUT` 只在固件侧定义，驱动 `pud.h` 里没有这个宏。
 
 ## 数据通道 1：EP1 图像帧
 
@@ -110,16 +119,14 @@ struct pud_ep1_header {
 - 驱动把它写在 `pud->encoder_buf` 的**最前面**，编码结果紧跟在后面（`encoder_buf_size`
   的可用量因此少 12 B），一次 SG 传输把两段一起发出去 —— 不用额外缓冲、也不违反
   "传输 buffer 必须 DMA 可映射"的约束。
-- `xe`/`ye` 是**闭区间**：驱动传来的是 `band.x2 - 1` / `band.y2 - 1`。
-  固件据此算出 `width = xe - xs + 1`。
+- `xe`/`ye` 是**闭区间**：驱动传来的是 `band.x2 - 1` / `band.y2 - 1`。固件据此算 `width = xe - xs + 1`。
 - 坐标是**相对于整屏**的绝对坐标。
 - 固件**两段读**：先一个最大包（64 B，header 一定在里面），再按 `size` 读剩下的。
   所以传输结束不依赖短包。
-- 一个**不可信**的 header（`12 + size` 超过设备缓冲，或矩形越界）会被
-  固件**丢弃并重新武装**，不是 stall（`g_ep1_stat.oversize++` / `.bad++`）。这是设备侧
-  刻意为之：stall 会让主机的写失败，而"主机 `clear_halt` 后重试"实测会把宿主控制器
-  卡死到连板子都重启不干净（见固件 `src/cherryusb/usb.c` 里
-  `usbd_vendor_ep1_bulk_out()` 的注释）。正常驱动靠分带不会送出这种 header。
+- 一个**不可信**的 header（`12 + size` 超过设备缓冲，或矩形越界）会被固件**丢弃并重新武装**，
+  不是 stall（`g_ep1_stat.oversize++` / `.bad++`）。这是设备侧刻意为之：stall 会让主机的写失败，
+  而"主机 `clear_halt` 后重试"实测会把宿主控制器卡死到连板子都重启不干净（见固件
+  `src/cherryusb/usb.c` 里 `usbd_vendor_ep1_bulk_out()` 的注释）。正常驱动靠分带不会送出这种 header。
 
 ### `size` 的奇偶：不要求，但主机最好仍然取偶
 
@@ -151,8 +158,7 @@ if (data_size % 2)
 
 **关键约束**：`12 + 一帧的压缩结果` 必须 ≤ **设备上报的** `frame_max`。v2 里固件是在
 读到 header 之后才校验的，超限的那一笔会被**丢弃**（`g_ep1_stat.oversize++`，宿主看不到
-错误），既不是静默截断、也不是 stall。驱动靠分带（见
-[display-and-refresh.md](display-and-refresh.md)）保证这一点。
+错误），既不是静默截断、也不是 stall。驱动靠分带（见 [display-and-refresh.md](display-and-refresh.md)）保证这一点。
 
 > 实测（2026-09，固件 `b88c42…`）：用临时超限补丁故意声明 1 MiB 的 payload 后，宿主
 > **没有**拿到任何传输错误，固件侧 `g_ep1_stat.oversize` 增长——即走的是丢弃分支。
@@ -236,9 +242,9 @@ struct pud_caps {
   + 12 B EP1 header），`pud_fb_dirty()` 用它算 `rows`。
 - `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE，
   5 → QOI + raw deflate（设备把每个传输 inflate 回 QOI 码流再解码，EP1 帧格式不变）；
-  0/1/2 目前会报错并置 `needs_full_refresh`（见
-  [display-and-refresh.md](display-and-refresh.md)）。设备没报能力时按 QOI（固件默认）。
-  这个数字是协议字段，**不要重排**；5 是追加的值，老固件不会报它。
+  0/1/2 目前会报错并置 `needs_full_refresh`（见 [encoders.md](encoders.md)）。
+  设备没报能力时按 QOI（固件默认）。这个数字是协议字段，**不要重排**；5 是追加的值，
+  老固件不会报它。
 - **面板参数也来自这里**（`pud_caps_to_display()`）：分辨率、旋转、bpp、总线时钟都写进
   每台设备自己的 `pud->display_data`（`pud->display` 指向它），DRM mode 与输入设备的
   轴范围都由它推出来 —— 驱动里**不再有写死的 480×320**。查询发生在后端分配之前

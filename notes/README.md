@@ -1,27 +1,35 @@
 # PUD-kernel-drivers 知识库
 
-本目录存放驱动自身的**设计说明、协议约定、移植记录与踩坑总结**。
-`README.md`（仓库根目录）面向使用者，讲"怎么装、怎么跑"；这里面向维护者，讲"为什么是这样写的"。
+> 维护者视角的知识库：驱动**为什么这样写**、协议**怎么约定**、验证**怎么做**。
+> 仓库根 [`README.md`](../README.md) 面向使用者，讲"怎么装、怎么跑"。
+
+## 本知识库范围
+
+- 主机侧 USB 显示驱动 `pud`（DRM/KMS + fbdev + input）的设计与调试知识。
+- 与固件仓 `Pico-USB-Display` 的协议契约（本仓 `usb-protocol.md` 为**权威定义**）。
+- 不重复通用内核知识：`drm_*`、`usb_*`、`libinput` 的通用行为只在"本驱动为什么踩到它"时记录。
 
 ## 文档索引
 
-| 文档 | 内容 |
+| 文档 | 一句话内容 |
 | --- | --- |
-| [architecture.md](architecture.md) | 代码地图：各文件职责、数据流、fbdev/DRM 双后端 |
-| [usb-protocol.md](usb-protocol.md) | 与固件之间的 USB 厂商协议（**权威定义**，固件侧的镜像文档见 `Pico-USB-Display/notes/usb-protocol.md`） |
-| [display-and-refresh.md](display-and-refresh.md) | 手工搭 KMS 流水线（simple-KMS 弃用后的写法）、damage 局部刷新、QOI 分带与整屏兜底 |
-| [build-and-test.md](build-and-test.md) | 交叉编译（objtree 与 headers 两种模式，都是 6.1.172）与真机验证流程 |
-| [usbmon.md](usbmon.md) | 用 usbmon 看驱动实际发了什么：怎么抓、行怎么读、常用过滤、实测参照 |
-| [pitfalls.md](pitfalls.md) | 踩坑合集：DMA buffer 规则、`transfer buffer is on stack`、vmalloc、swiotlb、模块引用计数 |
-
-## 相关仓库
-
-- 固件端：`Pico-USB-Display`（RP2350 / FreeRTOS / CherryUSB），其知识库在 `Pico-USB-Display/notes/`
-  （固件侧的待办清单在同目录的 `todo.md`）
-- QOI 编解码库：`rgb565-qoi/`（上游独立仓库），本驱动通过 `rgb565_qoi.c` / `rgb565_qoi.h` 内联集成
+| [architecture.md](architecture.md) | 代码地图：文件职责、构建组成、运行期参数、设备参数、数据流与固件对应关系 |
+| [usb-protocol.md](usb-protocol.md) | 主机↔设备 USB 厂商协议（**权威字段定义**；固件侧镜像见 `Pico-USB-Display/notes/usb-protocol.md`） |
+| [display-and-refresh.md](display-and-refresh.md) | 手工 KMS 流水线、damage 局部刷新、分带规则、缓冲区、`needs_full_refresh` 兜底与残影 |
+| [encoders.md](encoders.md) | 按设备 `decoder_type` 选编码器：QOI / RLE / QOI+deflate，JPEG 路径的限制 |
+| [input-touch.md](input-touch.md) | EP4 触摸：能力位、`report_mode`、libinput 绝对轴要求、多显示器绑定 |
+| [build-and-test.md](build-and-test.md) | 构建：Makefile 设计、`PUD_USB_ASYNC`、objtree / headers / 本机三种模式 |
+| [board-testing.md](board-testing.md) | 真机与 QEMU 验证：部署、期望 dmesg、检查清单、卸载坑、固件调试 |
+| [kernel-api-differences.md](kernel-api-differences.md) | 6.1 / 6.12 / 7.0 的 DRM API 差异（唯一权威表） |
+| [usbmon.md](usbmon.md) | 用 usbmon 看驱动实际发了什么：抓取、读法、常用过滤、实测参照 |
+| [pitfalls.md](pitfalls.md) | 踩坑分类索引：DMA/内存、USB 传输、DRM、模块生命周期 |
 
 ## 维护约定
 
-- 文档中的**协议字段、常量值、缓冲区尺寸**必须与代码一致；改代码时请同步改动这里。
-- 每处结论尽量标注来源文件（如 `usb.c:pud_flush()`），便于核对。
-- 只写**已验证**的结论，推测请显式标注"未验证"。
+- **协议字段、常量、缓冲尺寸必须与代码一致**；改代码同步改这里，
+  协议改动同时改固件仓镜像文档（见根 [`AGENTS.md`](../AGENTS.md)）。
+- 结论尽量标注来源（如 `usb.c:pud_flush()`），便于核对。
+- 只写**已验证**的结论；观察注明测试条件；推测显式标注"未验证"。
+- 一文档一问题；新知识优先合并进既有权威文档，不建近义文档。
+- 超过 ~150 行触发压缩审查，超过 ~300 行评估拆分。
+- 中文叙述，命令/路径/标识符保留英文。

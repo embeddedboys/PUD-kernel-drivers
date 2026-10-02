@@ -1,63 +1,69 @@
-# 构建与真机验证
+# 构建
 
-## Makefile 设计
+> Makefile **不硬编码任何内核路径**，全部命令行传入；同一份源码支持厂商 6.1 源码树、板子运行内核的
+> headers、以及本机 generic 内核三种模式，靠 `vermagic` 必须与目标内核一致来约束。
 
-`Makefile` **不硬编码任何内核路径**，全部通过命令行变量传入：
+## TL;DR
+
+- 变量：`KERN_DIR` / `KERN_OBJ_DIR` / `ARCH` / `CROSS_COMPILE`；默认取本机运行内核。
+- 内核用 `O=` 分离构建时必须传 `KERN_OBJ_DIR`（源码树里没有 linker 需要的生成文件）。
+- **绝不修改 `KERN_DIR` 指向的目录**；需要 objtree 就传 `KERN_OBJ_DIR`，不要在源码树里补文件。
+- 构建开关 `PUD_USB_ASYNC=0|1` 选 EP1 传输路径；一个镜像只编一条。
+- 验证 `vermagic`：`modinfo pud.ko | grep vermagic` 必须等于目标内核 `uname -r`。
+- 真机/QEMU 验证流程见 [board-testing.md](board-testing.md)。
+
+## Makefile 变量
 
 | 变量 | 默认 | 含义 |
 | --- | --- | --- |
 | `KERN_DIR` | `/lib/modules/$(uname -r)/build` | 目标内核源码树 |
-| `KERN_OBJ_DIR` | 空 | 该内核的 **out-of-tree 构建目录（objtree）**，仅当内核是用 `O=` 编译时才需要 |
+| `KERN_OBJ_DIR` | 空 | 该内核的 **out-of-tree 构建目录（objtree）**，仅当内核用 `O=` 编译时需要 |
 | `ARCH` | 本机（`uname -m`） | 目标架构。交叉编译要显式传 `ARCH=arm64` |
 | `CROSS_COMPILE` | 空（本机工具链） | 交叉编译器前缀，例如 `aarch64-linux-gnu-` |
 
-默认取本机：`KERN_DIR` 默认是运行内核，本机编译和在板子上编译都是原生的。交叉编译才需要显式指定：
-
 ```bash
+make modules                                       # 本机运行内核（默认全对）
 make modules ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+make modules KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
+make clean   KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
 ```
 
-```bash
-make modules   KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
-make clean     KERN_DIR=<...> [KERN_OBJ_DIR=<...>]
-```
+**为什么需要 `KERN_OBJ_DIR`**：内核用 `O=` 分离构建时，链接模块所需的生成文件（`scripts/module.lds`、
+`Module.symvers`、`.config`）都在 objtree 里，源码树里没有。不传会出现 `scripts/module.lds: No such file`。
 
-**为什么需要 `KERN_OBJ_DIR`**：内核用 `O=` 分离构建时，
-链接模块所需的生成文件（`scripts/module.lds`、`Module.symvers`、`.config`）都在 objtree 里，
-源码树里没有。不传就会出现 `scripts/module.lds: No such file` 之类的失败。
+## 构建选项：`PUD_USB_ASYNC`
 
-## 构建选项
-
-| 变量 | 默认 | 含义 |
-| --- | --- | --- |
-| `PUD_USB_ASYNC` | `0` | EP1 传输路径。`0` = 同步 `usb_sg`（`usb_sg_init`/`usb_sg_wait`，栈上 timer → `usb_sg_cancel`）；`1` = 异步 URB（`usb_submit_urb` + completion，`wait_for_completion_timeout` → `usb_kill_urb`）。两条路径状态不共享，一个镜像只编一条 |
+| 值 | EP1 传输路径 |
+| --- | --- |
+| `0`（默认） | 同步 `usb_sg`（`usb_sg_init`/`usb_sg_wait`，栈上 timer → `usb_sg_cancel`） |
+| `1` | 异步 URB（`usb_submit_urb` + completion，`wait_for_completion_timeout` → `usb_kill_urb`） |
 
 ```bash
 make modules KERN_DIR=<...> PUD_USB_ASYNC=1
 ```
 
-异步路径的 DMA 源仍是 `pud->encoder_buf`（`dma_alloc_coherent`），URB 直接带
-`URB_NO_TRANSFER_DMA_MAP` + `transfer_dma = pud->encoder_dma`，**不**让 USB 核心去 map
-vmap 地址 —— 这正是同步路径要建 SG 表的原因（见 [pitfalls.md](pitfalls.md) 1.2）。
+两条路径状态不共享，一个镜像只编一条。异步路径的 DMA 源仍是 `pud->encoder_buf`
+（`dma_alloc_coherent`），URB 直接带 `URB_NO_TRANSFER_DMA_MAP` + `transfer_dma = pud->encoder_dma`，
+**不**让 USB 核心去 map vmap 地址 —— 这正是同步路径要建 SG 表的原因（见 [pitfalls.md](pitfalls.md) 1.2）。
 两条路径的成功返回值相同（payload 字节数），调用方（`pud_flush`、DRM commit）不变。
 
-### 真机对比结论（2026-09）
+### 真机对比结论（2026-09，同步 vs 异步）
 
-板子：RK3588 系 xHCI（`fc400000.usb`）+ RP2350 固件。两个自然失败场景下，两条路径
-**表现一致**，都没有把板子弄卡：
+环境：RK3588 系 xHCI（`fc400000.usb`）+ RP2350 固件。两个自然失败场景下两条路径**表现一致**，都没有
+把板子弄卡：
 
 | 场景 | 同步 `usb_sg` | 异步 URB |
 | --- | --- | --- |
 | 设备停摆（SWD halt 住 Pico）后触发 flush | `-ETIMEDOUT`（约 3 s）后返回；`rmmod` 5183 ms 成功 | 同样 `-ETIMEDOUT`；`rmmod` 5247 ms 成功 |
 | 压屏中断开重枚举（复位 Pico） | 干净重新 probe，板子保持响应 | 同样 |
 
-**没能在当前硬件上复现出同步路径卡死**，因为触发点已经在固件侧消失：固件对一个不可信
-header（`12+size` 超限、矩形越界）是**丢弃并重新武装**，不再 stall EP1
-（`g_ep1_stat.oversize` 增长，宿主看不到错误；用临时超限补丁验证）。历史上是
-"stall → 主机 `clear_halt` 重试"才把宿主控制器卡死到连板子都重启不干净，所以
-`pud_flush()` 里那段 `usb_clear_halt()` 现在只是防御（老固件/控制器级 stall）。
+> **历史纪律（针对老固件）**：EP1 stall → 主机 `clear_halt` 重试这条路径曾把宿主控制器卡死到连板子都
+> 重启不干净，所以 `pud_flush()` 里那段 `usb_clear_halt()` 现在只是防御。
+> **当前固件已不再 stall**：对不可信 header（`12+size` 超限、矩形越界）是**丢弃并重新武装**
+> （`g_ep1_stat.oversize` 增长，宿主看不到错误；用临时超限补丁验证），所以**没能在当前硬件上复现出
+> 同步路径卡死**。这条纪律保留，因为老固件与控制器级 stall 仍可能发生。
 
-## 两种构建模式
+## 三种构建模式
 
 ### A. 厂商内核源码树（6.1.172，objtree 模式）
 
@@ -70,39 +76,33 @@ make modules \
 例如 `KERN_DIR=<...>/kernel-6.1`、`KERN_OBJ_DIR=<...>/build/linux-rockchip`
 （厂商内核用 `O=` 分离构建，源码树与 objtree 是两棵目录）。
 
-> ⚠️ **绝不修改 `KERN_DIR` 里的任何东西**。它是共享的内核源码目录，
-> 只作为头文件/符号来源。所有改动都留在本仓库。
+> ⚠️ **绝不修改 `KERN_DIR` 里的任何东西**。它是共享的内核源码目录，只作为头文件/符号来源。
 
 ### B. 板子运行内核的 headers（6.1.172，headers 模式）
 
-板子跑的内核版本可能与 `KERN_DIR` 不同。模块的 `vermagic` 必须与运行内核一致，
-否则 `insmod` 会报：
+板子跑的内核版本可能与 `KERN_DIR` 不同。模块 `vermagic` 必须与运行内核一致，否则 `insmod` 报：
 
 ```
 pud: disagrees about version of symbol module_layout
 ```
 
-**在板子上直接编**（版本天然一致，`KERN_DIR` 默认就对）：
+**在板子上直接编**（版本天然一致，`KERN_DIR` 默认就对）：`make modules`。
 
-```bash
-make modules            # = /lib/modules/$(uname -r)/build
-```
-
-**在 x86-64 开发机上交叉编**（板子在跑别的事情时更方便）：
+**在 x86-64 开发机上交叉编**：
 
 ```bash
 # 1) 从板子取 headers（板子上有 /usr/src/linux-headers-$(uname -r)）
 tar czf hdrs-$(uname -r).tgz -C /usr/src linux-headers-$(uname -r)
 
-# 2) 在 x86-64 开发机上解出
-#    目录形如 .pud-test/linux-headers-6.1.172/{Makefile,Module.symvers,arch,include,scripts}
+# 2) 在 x86-64 开发机上解出，目录形如
+#    .pud-test/linux-headers-6.1.172/{Makefile,Module.symvers,arch,include,scripts}
 
 # 3) 用该 headers 树编模块
 make -C .pud-test/linux-headers-6.1.172 \
      M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
 ```
 
-编完用 `modinfo` 确认 `vermagic` 与 `uname -r` 一致：
+编完确认 `vermagic`：
 
 ```bash
 modinfo pud.ko | grep vermagic
@@ -111,255 +111,46 @@ modinfo pud.ko | grep vermagic
 
 ### headers 里的 host 工具是 x86-64（板子上本地编的坑，Makefile 已处理）
 
-板子 `/usr/src/linux-headers-6.1.172/scripts/basic/fixdep` 是 **x86-64** 的
-（厂商在 x86-64 主机上交叉编译出 arm64 内核，`fixdep`/`modpost` 这类 host 工具跟着
-编成了 x86-64；拷到 WSL 后 BuildID 与板子上的完全一致，所以交叉编能直接跑）。
-在 arm64 板子上执行就是：
+板子 `/usr/src/linux-headers-6.1.172/scripts/basic/fixdep` 是 **x86-64** 的（厂商在 x86-64 主机上交叉
+编译出 arm64 内核，`fixdep`/`modpost` 这类 host 工具跟着编成了 x86-64；拷到 WSL 后 BuildID 与板子上
+完全一致，所以交叉编能直接跑）。在 arm64 板上执行就是：
 
 ```
 /bin/sh: 1: scripts/basic/fixdep: Exec format error
 ```
 
-这个坑没法让 kbuild 自己修：目录是 root 只读的；headers 包里没有任何 Kconfig，而
-`include/config/auto.conf.cmd` 把一大串不存在的 Kconfig 列成依赖，所以
-`make scripts_basic` / `make modules_prepare` 会先去跑 `syncconfig` 然后失败；
-把 `fixdep` 删掉也不会被重建 —— 外模块路径（`make M=... modules`）根本不构建 host 工具，
-只会得到 `scripts/basic/fixdep: not found`。
+这个坑没法让 kbuild 自己修：目录 root 只读；headers 包里没有任何 Kconfig，而
+`include/config/auto.conf.cmd` 把一大串不存在的 Kconfig 列成依赖，所以 `make scripts_basic` /
+`make modules_prepare` 会先去跑 `syncconfig` 然后失败；把 `fixdep` 删掉也不会被重建 —— 外模块路径
+（`make M=... modules`）根本不构建 host 工具，只会得到 `scripts/basic/fixdep: not found`。
 
-所以 `Makefile` 在**检测到 host 工具不是本机架构**（读 ELF 头 offset 18 的
-`e_machine`，只用 `od`）时会：
+所以 `Makefile` 在**检测到 host 工具不是本机架构**（读 ELF 头 offset 18 的 `e_machine`，只用 `od`）时会：
 
-1. 把 headers 树拷到 `~/.cache/pud-kbuild/<kernel release>`，按版本缓存。
-   拷贝必须用 `realpath` 解析后的路径：`/lib/modules/$(uname -r)/build` 是符号链接，
-   `cp -a` 会把链接本身拷过去，编译就写进只读的原目录（`Permission denied`）；
-2. 在副本里按 kbuild 自己记在 `.cmd` 里的命令，用**本机 gcc** 重建
-   `fixdep`/`modpost`（含 `mk_elfconfig`、`elfconfig.h`），flags 保持内核原样；
-3. 之后的构建全部用这个副本，**`KERN_DIR` 始终只读**（铁律 2）。
+1. 把 headers 树拷到 `~/.cache/pud-kbuild/<kernel release>`，按版本缓存。拷贝用 `realpath` 解析后的路径：
+   `/lib/modules/$(uname -r)/build` 是符号链接，`cp -a` 会把链接本身拷过去，编译就写进只读的原目录
+   （`Permission denied`）；
+2. 在副本里按 kbuild 自己记在 `.cmd` 里的命令，用**本机 gcc** 重建 `fixdep`/`modpost`
+   （含 `mk_elfconfig`、`elfconfig.h`），flags 保持内核原样；
+3. 之后的构建全部用这个副本，**`KERN_DIR` 始终只读**。
 
 实测：板子上从零 `make` 到 `pud.ko` 全绿，`vermagic` 正确；副本 65 MB，删掉
-`~/.cache/pud-kbuild/<release>` 即重做。x86 上交叉编不受影响（host 工具本来就能跑，
-不会走副本路径）。
+`~/.cache/pud-kbuild/<release>` 即重做。x86 上交叉编不受影响。
 
-### C. 本机内核（x86-64）与 QEMU 验证
+### C. 本机内核（x86-64）
 
-本分支（`7.0.0-34-generic`，名字跟着本机的 generic 内核走）编的就是**本机运行内核**：
-`KERN_DIR`、`ARCH`、`CROSS_COMPILE` 默认全对，一条命令就够：
+本分支编的就是**本机运行内核**，`KERN_DIR`、`ARCH`、`CROSS_COMPILE` 默认全对：
 
 ```bash
 make modules
 ```
 
-想在不冒"把本机内核搞崩"的风险下验证驱动就用 `make qemu`：它在 QEMU 里跑一份本机 rootfs
-的快照（`virtme-ng`，装在仓库根的 `.venv` 里），把 `pud.ko` 加载进去，然后留一个 root shell
-给你 —— **本机内核从头到尾没被碰过**。
-
-```bash
-make qemu                          # 启动 + 加载 + 交互 shell
-make qemu CMD='dmesg | grep pud'   # 跑一条命令就退出
-make qemu PARAMS=report_mode=pointer
-make qemu PASSTHROUGH=0            # 不把面板交给客户机
-```
-
-`scripts/qemu.sh` 在背后做的事（出问题时照这个手工来）：
-
-- **挑客户机内核**：优先运行内核，但得看得到镜像 —— Ubuntu 的 `/boot/vmlinuz-*` 是 root:600，
-  拿不到就退到"能从 apt 缓存里的 `linux-image-*.deb` 解出来"的最新一个（解出的镜像缓存在
-  `~/.cache/pud-kbuild/img/`）。想固定用某个镜像就传 `KERNEL_IMG=/path/to/vmlinuz-<rel>`；
-  想让客户机跑**运行内核**，把它的镜像复制成可读的一份：
-  `sudo cp /boot/vmlinuz-$(uname -r) ~/.cache/pud-kbuild/img/`。
-- **按客户机内核编模块**：`vermagic` 必须一致，所以定下内核后会用 `/lib/modules/<rel>/build`
-  重编（`modinfo -F vermagic` 已经是它了就跳过）。这会覆盖仓库里的 `./pud.ko`，
-  之后 `make modules` 再把它编回运行内核。
-- **透传面板**：`lsusb` 看得到 `2e8a:0001` 时加 `-device usb-host,...`（本机没加载 pud，
-  没有驱动占着它）。客户机里的驱动于是**真的在推那块面板**，只是推送方换成了客户机内核：
-  probe → caps → DRM 注册 → fbcon 接管 → 写 `/dev/fb0` 能在 usbmon 里数到 EP1，`rmmod` 干净。
-- **首次 probe 的 caps 兜底**：设备刚交给客户机时**第一笔厂商请求可能超时**
-  （`no capability report (-110)`），驱动于是退回宿主机默认值。同一个请求从 host 问设备是好的、
-  重载一次也一定好，所以那是**模拟 xHCI 侧的时序**、不是驱动行为：脚本检测到就自动
-  `rmmod` + `insmod` 一次把真实 caps 拿回来。手工路线遇到它，重载一次即可。
-
-手工起 VM 时几个容易卡住的地方：
-
-- `vng` **没有** `--kernel` 参数。内核镜像走 `--run <bzImage>`；`--run` 不带参数就用本机运行的内核。
-- `.venv/bin` 要在 `PATH` 里：`vng` 靠它找同目录的 `virtme-run`。
-- 客户机里 `insmod` 之前先 **`modprobe drm_dma_helper`**。7.0 把 fbdev 客户端并进了 drm 核心，
-  模块引用的 `drm_fbdev_dma_driver_fbdev_probe` 出自那里；不先加载就会
-  `insmod: ERROR: could not insert module pud.ko: Unknown symbol in module`。
-- 客户机里的 `/tmp` 是它自己的，客户机一退出就没了。要把文件带出来用 `--rwdir <hostdir>`
-  （两边同一个路径，客户机可写）；`dmesg -w` 这类"边跑边写"的输出要套 `stdbuf -oL`，
-  否则块缓冲在机器断电时全丢。
-- 客户机里没有 systemd 当 PID 1（`systemctl poweroff` 不可用），要关机 `--exec` 里跑一句
-  `python3 -c "import ctypes; ctypes.CDLL(None, use_errno=True).reboot(0x4321fedc)"`。
-
-实测（2026-09，7.0.0-34 客户机 + 真设备直通）：写 `/dev/fb0` 64 KB 随机像素 → EP1 7 笔 ~95 KB
-（QOI 编码，见 [display-and-refresh.md](display-and-refresh.md)）；
-`poweroff` 时客户机 dmesg 末尾出现 `pud_drm_pipe_disable`（`usb_driver.shutdown` 那条路径）。
-
-## 真机验证流程
-
-### 前置
-
-- 开发板（RK3588）+ Pico 已经插好；`lsusb` 能看到 `2e8a:0001`。
-- 建议的辅助脚本（本仓库之外，工作区的 `.pud-test/` 下）：
-  `ssh.sh` / `scp.sh` / `sudo.sh`（免密登录 + sudo 封装）、
-  `scripts/loadN.sh`（**校验 md5 后 insmod**）。
-
-### 部署 + 加载
-
-`scripts/pud-load.sh` 在**板子上**跑（`insmod`/`rmmod` 只存在于那边），加载、卸载、
-查看状态一个工具包完：
-
-```bash
-scp pud.ko <board>:~/pud/                     # 或者直接在板子上 make modules
-ssh <board>
-  scripts/pud-load.sh load                     # 显示 + 触摸
-  scripts/pud-load.sh load input_only=1        # 只触摸（rmmod 随时能卸，调触摸首选）
-  scripts/pud-load.sh load input_only=1 report_mode=pointer
-  scripts/pud-load.sh status                   # 参数 / 显示节点 / 输入设备 / dmesg
-  scripts/pud-load.sh unload                   # 被桌面占住时会告诉你重新用 --stop-dm
-  scripts/pud-load.sh unload --stop-dm         # 停显示管理器 → rmmod → 起回来
-  scripts/pud-load.sh reload input_only=1      # 换参数/换 .ko 时用
-```
-
-它替你做掉三件以前靠人记的事：
-
-1. **vermagic 校验**：`modinfo -F vermagic` 必须等于 `uname -r`，否则直接拒绝加载并说明
-   原因 —— 这代替了以前"人工对 md5"，而且能同时抓住"传了旧 `.ko`"和"编错了内核"两类事故（
-   实测：`vermagic 6.1.172 (running kernel: 6.1.172)` 通过，不匹配时给出修复提示）。
-   顺手把 md5 也打出来，便于和 `scp` 的来源对账。
-2. **卸载被占用的处置**：先 `lsof /dev/dri/*` 列出占用者，再提示
-   `--stop-dm`；带该参数时按"停显示管理器 → rmmod → 起回来"走一遍，即使 rmmod 失败也会把
-   会话拉回来。显示管理器是 `systemctl is-active` 问出来的（gdm/lightdm/sddm…，`PUD_DM=<unit>`
-   可以覆盖），所以换成别的桌面发行版也不用改脚本。
-
-3. **依赖先加载**：`insmod` 自己不会解析依赖，而 7.0 把 fbdev 客户端放进了 drm 核心、
-   DMA helper 放在 `drm_dma_helper` —— 脚本按 `modinfo -F depends` 先 `modprobe -a`。
-   漏掉这一步就是 `Unknown symbol in module`（见 [pitfalls.md](pitfalls.md) 4.4）。
-
-`PUD_KO=/path/to/pud.ko` 可以指定别的模块（默认为仓库根的 `./pud.ko`），
-`MODULE=` 可以换模块名。工具只依赖 `kmod`/`lsof`/`systemctl`，不带任何本机路径。
-
-> 老工作区里那些 `loadN.sh` 把路径和 md5 写死了，换一块板子或换一次构建就要改；
-> 现在统一用这个工具。
-
-### 期望的 dmesg
-
-```
-pud_drm_setup
-pud-drm: pud_drm_alloc
-pud-drm: mode: 480x320
-pud-drm: pud_drm_register
-[drm] Initialized pud-drm 1.0.0 ... for 7-1:1.0 on minor N
-pud 7-1:1.0: [drm] fb0: pud-drmdrmfb frame buffer device
-sn : 0x................
-input: pud touch panel as /devices/.../inputNN
-pud-drm: pud_drm_pipe_enable
-```
-
-### 检查清单
-
-```bash
-# 1) 有没有 oops / WARN / DMA 相关错误
-dmesg | grep -iE 'pud|usb.*(fail|error)|swiotlb|rejecting|on stack|Oops|WARNING'
-
-# 2) 显示设备是否注册并被点亮
-ls /dev/dri/card*; ls /dev/fb*
-cat /sys/class/drm/card*-USB-*/status    # connected
-cat /sys/class/drm/card*-USB-*/enabled   # enabled
-
-# 3) 模块引用计数（关系到能否 rmmod）
-cat /sys/module/pud/refcnt
-```
-
-### 卸载模块的坑
-
-`rmmod pud` 很可能失败：
-
-```
-ERROR: Module pud is in use
-```
-
-因为合成器（gnome-shell 那类 Wayland 合成器）持有 `/dev/dri/cardN` 的 fd。`refcnt` 会随着
-分辨率/热插拔事件累积（曾观察到涨到 32）。
-
-**先搞清楚是谁占的**，两种情形处理方式完全不同（2026-09 实测）：
-
-| 谁占的 | 怎么认 | 怎么办 |
-| --- | --- | --- |
-| **用户态**会话持有 fd | `/proc/*/fd` 扫出进程（见下），`refcnt` 与"打开的 fd 数"对得上 | 停掉那个会话：`pud-load.sh unload --stop-dm` 会自己找运行中的显示管理器停掉再卸；手动则是 `systemctl stop <unit>`（unit 名随发行版不同） |
-| **内核内部**（fbdev 模拟 + fbcon） | 扫 `/proc/*/fd` 为空但 `refcnt > 0`；`/sys/class/vtconsole/vtcon1/name` = `frame buffer device` 且 `bind=1` | **解绑 vtconsole**：`echo 0 > /sys/class/vtconsole/vtcon1/bind`（见 README 的"Useful commands"） |
-
-**先确认板上有没有 `lsof`**：本机就**没装**，`lsof … 2>/dev/null` 会给出"没人持有"的
-**假结论**（实测踩过）。用这个不依赖工具的扫法：
-
-```bash
-for f in /dev/dri/card* /dev/fb*; do
-  for p in /proc/[0-9]*; do
-    for fd in $p/fd/*; do
-      [ "$(readlink $fd 2>/dev/null)" = "$f" ] && \
-        echo "$f <- pid $(basename $p) $(cat $p/comm 2>/dev/null)"
-    done
-  done
-done
-```
-
-实测（2026-09）：`refcnt` 是 5，扫出来正好是一个全屏合成器会话持有的若干 card3 fd 加
-`systemd-logind` 的一个 —— **fbcon 不占 fd、也不拦 `rmmod`**（`/dev/fb0` 一个进程都没打开）。
-
-**可靠的重置手段仍然是重启开发板。**
-
-### 只调触摸：`input_only=1`
-
-反复试触摸时别把显示那半边也加载进来：
-
-```bash
-sudo insmod pud.ko input_only=1         # 只注册 input 设备，没有 DRM/fbdev 节点
-grep -A5 pud /proc/bus/input/devices    # 找 eventN
-sudo timeout 10 cat /dev/input/eventN | od -An -tx2   # 按屏幕就会出字节
-sudo rmmod pud                          # 立刻能卸
-```
-
-没有 DRM 节点 → 桌面会话/logind 占不住模块 → 不用停显示管理器、不用重启，
-改一次 `input.c` 就能马上重编重载。默认（`input_only=0`）仍是显示 + 触摸一起注册，
-那时 `rmmod` 还是会被桌面会话挡住。
-
-### fbdev 编号不固定
-
-PUD 是哪个 `/dev/fbN` **取决于启动顺序**：板载 `rockchipdrmfb` 和 `pud-drmdrmfb`
-谁先注册谁拿 `fb0`。曾经 PUD 是 `fb1`，后来又变成 `fb0`。**别在脚本里写死**，
-用名字查：
-
-```bash
-for f in /sys/class/graphics/fb*; do echo "$f: $(cat $f/name)"; done
-# /sys/class/graphics/fb0: pud-drmdrmfb     ← 这个才是 PUD
-```
-
-## 调试固件（Pico）
-
-驱动调试不需要动固件；如果要看固件内部状态（解码计数、断点），走 CMSIS-DAP：
-
-- OpenOCD 在 **Windows 宿主机**上跑（WSL 看不到 USB 设备，也没有 `/dev/bus/usb` 权限，
-  且无法 `mknod`）：
-  ```bash
-  openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 10000"
-  ```
-- WSL 侧通过 `localhost:3333`（gdb）连过去：
-  ```bash
-  gdb-multiarch -q -nh \
-    -ex "file Pico-USB-Display/build-pico2/pico-usb-display.elf" \
-    -ex "target extended-remote localhost:3333"
-  ```
-- **原生 Linux 开发机不需要 Windows/WSL 这一层**（2026-09 实测）：调试器直接挂在开发机上时，
-  OpenOCD 就跑在本机，gdb 连 `localhost:3333` 的命令与上面完全相同。此时注意 openocd 0.12
-  把 `rp2350.cm0` / `rp2350.cm1` 当成**一个 SMP 组**：只 halt 一个核再 `resume` 会失败，
-  并把核留在停机状态（板子看起来卡死）—— 先把两个核都 `halt`，再 `resume` 一次带上整组。
-  详见固件仓 `Pico-USB-Display/notes/debugging.md` 的"halt/resume 的坑"。
-- `/tmp` 在 WSL 里**每次调用都是独立的**，不要把中间产物放那儿再跨调用读。
-
-详见 `Pico-USB-Display/notes/debugging.md`。
+想在不冒"把本机内核搞崩"的风险下验证驱动，用 `make qemu`（下一步见 [board-testing.md](board-testing.md)）。
 
 ## 其它环境注意事项
 
 - 交叉编译器：`aarch64-linux-gnu-gcc`（Debian/Ubuntu 包 `gcc-aarch64-linux-gnu`）。
 - 若 `rmmod` 后立刻 `insmod` 报 `File exists`，说明上一次卸载没干净 —— 重启板子。
-- 编译产物（`*.o`、`*.ko`、`*.mod*`、`build/`）已在 `.gitignore` 中，不要提交。
+- 编译产物（`*.o`、`*.ko`、`*.mod*`、`build/`、`compile_commands.json`）已在 `.gitignore` 中，不要提交。
+- `make modules` 会顺带生成 **`compile_commands.json`**（用内核的
+  `scripts/clang-tools/gen_compile_commands.py` 解析 kbuild 的 `.*.cmd`），仓库根 `.clangd`
+  指向它；交叉编译器头文件路径报缺失时用 `clangd --query-driver=/usr/bin/aarch64-linux-gnu-*` 启动。

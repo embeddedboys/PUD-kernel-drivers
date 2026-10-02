@@ -10,10 +10,10 @@ board's kernel, the vendor source tree and its headers package are all 6.1.172
 -- and it carries `AGENTS.md` and `notes/`; both of its build modes are in
 [notes/build-and-test.md](./notes/build-and-test.md).
 `7.0.0-34-generic` is the same driver ported forward to a current x86-64
-distribution kernel (the branch follows the machine's generic kernel, so its
-name moves with it); it builds natively (`make modules`) and can be exercised
-against a real panel inside QEMU, see
-[notes/build-and-test.md](./notes/build-and-test.md) section C.
+distribution kernel (named after the generic kernel it was ported to; if the
+machine's kernel has since moved on, run `make modules` before loading). It
+builds natively and can be exercised against a real panel inside QEMU, see
+[notes/board-testing.md](./notes/board-testing.md).
 
 install tools
 ```bash
@@ -33,7 +33,7 @@ The default display backend is DRM.
 `make qemu` boots a throwaway VM (virtme-ng, installed in `.venv/`) with the
 module loaded and leaves a root shell there, so the driver can be exercised
 without ever loading it on this machine. `PARAMS=`, `CMD=` and `PASSTHROUGH=`
-tune it; see [notes/build-and-test.md](./notes/build-and-test.md) section C.
+tune it; see [notes/board-testing.md](./notes/board-testing.md).
 
 ## Load / unload
 
@@ -98,10 +98,19 @@ mplayer -vo fbdev2 -vf scale=480:320 xxx.mp4
 
 ## Development notes
 
-Design notes and pitfall write-ups for maintainers live in [`notes/`](./notes/):
+Design notes and pitfall write-ups for maintainers live in [`notes/`](./notes/); the full index
+is [notes/README.md](./notes/README.md).
 
 - [Architecture and code map](./notes/architecture.md)
 - [USB protocol](./notes/usb-protocol.md) (authoritative field definitions)
-- [Display and refresh policy](./notes/display-and-refresh.md) (damage, QOI/RLE, band splitting)
-- [Build and test](./notes/build-and-test.md) (objtree and headers, both 6.1.172)
+- [Display and refresh policy](./notes/display-and-refresh.md) (damage, band splitting)
+- [Encoders](./notes/encoders.md) (QOI / RLE / QOI+deflate, JPEG limits)
+- [EP4 touch input](./notes/input-touch.md) (report modes, libinput absolute axes)
+- [Build](./notes/build-and-test.md) (objtree and headers modes)
+- [Board and QEMU testing](./notes/board-testing.md) (deploy, unload, firmware debug)
+- [Kernel API differences](./notes/kernel-api-differences.md) (6.1 / 6.12 / 7.0)
+- [usbmon](./notes/usbmon.md) (what the driver actually sent)
 - [Pitfalls](./notes/pitfalls.md) (DMA buffers, `transfer buffer is on stack`, vmalloc, swiotlb)
+
+Host-side checks: `make test` (offline: protocol constants, band formula, module metadata).
+Reusable tools are in [`tools/`](./tools/) (`protoctl`, `pudctl`, `usbmonctl`, `fbctl`).

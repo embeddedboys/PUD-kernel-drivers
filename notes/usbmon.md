@@ -1,10 +1,16 @@
 # 用 usbmon 看驱动到底往设备发了什么
 
-`usbmon` 是内核里的 USB 抓包设施（相当于 USB 上的 tcpdump）。在这个项目里它回答一个
-`dmesg` 回答不了的问题：**驱动有没有发、发了多少、每次是多大的矩形**。
+> usbmon 是内核的 USB 抓包设施（USB 上的 tcpdump），回答 `dmesg` 回答不了的问题：
+> **驱动有没有发、发了多少、每次是多大矩形**。它抓的是"驱动向 HCD 提交的请求"，
+> **必须在 USB 主机那一侧跑** —— PUD 接在哪台机器上就在哪台机器上抓。
 
-它抓的是"驱动向 HCD 提交的请求"，所以**必须在 USB 主机那一侧跑** —— 本项目的 PUD 接在
-哪台机器上，就在哪台机器上抓。
+## TL;DR
+
+- 先挂 debugfs 再 `modprobe usbmon`，抓 `<bus>u`（本项目用 `u`，`t` 是弃用旧格式）。
+- **先把抓取挂上，再做动作**；`cat` 要套 `timeout`。
+- **只看 `C` 行**（回调）：提交行的长度是"请求的"，回调行才是真正发生的。
+- `Bo:…:1` = EP1 图像流；`Ii:…:4` = EP4 触摸（长度应恒为 8）。
+- 结论口诀：**"dmesg 干净 + usbmon 有流量"才等于真的没出错**。
 
 ## 一、准备
 
@@ -16,9 +22,8 @@ sudo modprobe usbmon
 ls /sys/kernel/debug/usb/usbmon/       # 出现 0s 0u 1s 1t 1u 2s 2t 2u …
 ```
 
-文件名是 `<busnum><type>`：**我们要用 `u`**（`0u` = 所有总线）。同一目录里的 `t` 是 2.6.21
-起弃用的旧文本格式（字段更少），`s` 不用管。详见内核自带的
-`Documentation/usb/usbmon.rst`。
+文件名是 `<busnum><type>`：**我们要用 `u`**（`0u` = 所有总线）。同目录的 `t` 是 2.6.21 起弃用的旧文本
+格式（字段更少），`s` 不用管。详见内核自带 `Documentation/usb/usbmon.rst`。
 
 ## 二、抓
 
@@ -30,14 +35,13 @@ lsusb | grep 2e8a                   # -> Bus 006 Device 002
 timeout 40 sudo cat /sys/kernel/debug/usb/usbmon/6u > /tmp/usbmon.txt
 ```
 
-> **顺序很重要：先把抓取挂上，再做那个动作。** 这一点实测踩过两次 —— 动作做完才起
-> `cat`，文件里一行都没有，白等一轮。
+> **顺序很重要：先把抓取挂上，再做那个动作。** 实测踩过两次 —— 动作做完才起 `cat`，文件里一行都没有。
 
 抓的时候别做别的重活：14 秒就能有 560 行、20 万字节。
 
 ## 三、读
 
-每行是一个事件，字段从左到右（按内核文档的说法）：
+每行是一个事件，字段从左到右：
 
 | 字段 | 例子 | 说明 |
 | --- | --- | --- |
@@ -58,8 +62,6 @@ timeout 40 sudo cat /sys/kernel/debug/usb/usbmon/6u > /tmp/usbmon.txt
 | `Co` / `Ci` | control out / in | EP0 的厂商请求 |
 | `Zo` / `Zi` | isochronous | 本驱动不用 |
 
-**只看 C 行**：S 行的长度是"请求的"，只有 C 行才是真正发生的。
-
 ## 四、本项目常用的几条过滤
 
 把 `6:002` 换成上一步查到的实际 `<bus>:<dev>`：
@@ -79,9 +81,11 @@ grep 'C Bo:6:002:1' /tmp/usbmon.txt | awk '{print $2}' \
 grep 'C Ii:6:002:4' /tmp/usbmon.txt | awk '{print $6}' | sort | uniq -c
 ```
 
+上面的解析已封装进 [`tools/usbmonctl`](../tools/usbmonctl)（`parse --json`）。
+
 ## 五、实测长什么样（2026-09，RK3588 + RP2350）
 
-四条都是这次真抓到的，可以当"正常 / 异常"的参照：
+四条都是真抓到的，可当"正常 / 异常"参照：
 
 | 场景 | usbmon 里的样子 | 说明 |
 | --- | --- | --- |
@@ -92,17 +96,16 @@ grep 'C Ii:6:002:4' /tmp/usbmon.txt | awk '{print $6}' | sort | uniq -c
 | 同一个脚本，驱动设上 `prefer_shadow_fbdev` 之后 | **4368 笔 / 2.3 MB**（脚本按行写，一行一次更新） | 同一件事的**对照**：usbmon 也是验证"改好了没有"最直接的手段 |
 
 > 最后一条的成因：fbdev 模拟层只有在驱动要求 shadow framebuffer 时才装 deferred IO
-> （`drm_fbdev_use_shadow_fb()` = `prefer_shadow_fbdev` / `prefer_shadow` /
-> `fb->funcs->dirty` 三者之一），本驱动一个都没满足，所以**用户态 mmap 写 `/dev/fb0`
+> （7.0 判据是 `fb->funcs->dirty`），本驱动当时一个都没满足，所以**用户态 mmap 写 `/dev/fb0`
 > 不产生任何提交**。合成器（走 DRM）和 fbcon（走 fb 层的显式标脏）那两条路都正常。
 
-## 六、和别的手段怎么配合（AGENTS.md 的"两侧对账"）
+## 六、和别的手段怎么配合（"两侧对账"）
 
 | 想知道 | 用什么 |
 | --- | --- |
 | 驱动发没发、发了多少、什么尺寸 | usbmon（本文） |
 | 驱动有没有报错 | `dmesg`：EP1 失败会打 `EP1 transfer failed (…)`（`dev_warn_ratelimited`），连续 3 次再打一条 `dev_err` |
-| 设备收到什么、丢了多少 | 设备侧计数器（gdb，见 `Pico-USB-Display/notes/debugging.md`） |
+| 设备收到什么、丢了多少 | 设备侧计数器（gdb，见 [board-testing.md](board-testing.md) 与固件仓 notes） |
 
 **一个推论**：驱动只在失败时打日志，所以"**dmesg 干净 + usbmon 有流量**"才等于"真的没出错"；
 只看到 dmesg 干净说明不了传输发生过。
