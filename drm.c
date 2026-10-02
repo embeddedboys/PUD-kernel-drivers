@@ -22,6 +22,7 @@
 
 #include "pud.h"
 #include "encoder.h"
+#include "tinyc.h"
 
 #define DRV_NAME "pud-drm"
 
@@ -162,8 +163,49 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
  * 64 KB.  It falls back to PUD_DEFAULT_BAND_PIXELS when the device does not
  * report anything.
  */
-static int pud_encode_band(struct pud *pud, unsigned int width,
-                           unsigned int height, size_t *out_size)
+/*
+ * Let the band just encoded stand as a dictionary for later bands with the
+ * same rectangle, and consume the serial the device gave it.
+ *
+ * Only called once the flush has succeeded.  The device counts a serial for
+ * every band it accepts, so a serial spent on a band that never arrived would
+ * make every later delta name the wrong one -- and the device would refuse
+ * them all, silently, because the driver cannot see its counters.
+ */
+static void pud_qoid_commit(struct pud *pud)
+{
+	unsigned int s = pud->qoid_next;
+
+	if (!pud->qoid_pending.valid)
+		return;
+
+	/*
+	 * Copy the QOI stream here, not at encode time.  The slot at qoid_next
+	 * still describes an older band until the lines below, so writing its
+	 * bytes earlier would leave that description pointing at a different
+	 * band's stream whenever a flush failed in between -- and a delta built
+	 * from the wrong history is a stream the device decodes without
+	 * complaining, which is corruption rather than a refusal.
+	 */
+	if (pud->qoid_pending.len)
+		memcpy(pud->qoid_hist_buf + (size_t)s * PUD_QOID_DICT_MAX,
+		       pud->qoiz_buf, pud->qoid_pending.len);
+
+	pud->qoid_slots[s].serial = pud->qoid_serial;
+	pud->qoid_slots[s].len = pud->qoid_pending.len;
+	pud->qoid_slots[s].x1 = pud->qoid_pending.x1;
+	pud->qoid_slots[s].y1 = pud->qoid_pending.y1;
+	pud->qoid_slots[s].x2 = pud->qoid_pending.x2;
+	pud->qoid_slots[s].y2 = pud->qoid_pending.y2;
+
+	pud->qoid_next = (s + 1) % PUD_QOID_HISTORY;
+	pud->qoid_serial++;
+	pud->qoid_pending.valid = false;
+}
+
+static int pud_encode_band(struct pud *pud, const struct drm_rect *band,
+                           unsigned int width, unsigned int height,
+                           size_t *out_size)
 {
 	u8 *out = pud->encoder_buf + PUD_EP1_HEADER_SIZE;
 	size_t capacity = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
@@ -192,6 +234,77 @@ static int pud_encode_band(struct pud *pud, unsigned int width,
 			return rc;
 		return qoiz_deflate(pud->qoiz_strm, pud->qoiz_buf, qoi_size, out,
 		                    capacity, out_size);
+	}
+	case PUD_DECODER_QOID: {
+		const struct pud_qoid_slot *best = NULL;
+		const u8 *dict = NULL;
+		size_t dict_len = 0, qoi_size;
+		u32 dict_serial = 0;
+		bool keyframe = true;
+		unsigned int i;
+		int rc;
+
+		if (!pud->qoid_work || !pud->qoid_hist_buf)
+			return -EOPNOTSUPP;
+
+		rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
+		                       pud->qoiz_buf_size, pud->qoiz_buf,
+		                       &qoi_size);
+		if (rc)
+			return rc;
+
+		/*
+		 * Newest remembered band covering this exact rectangle.  This is
+		 * the optimistic policy: we assume the device's serial counter
+		 * still matches ours, which EP1 flow control makes true (the
+		 * firmware's invariant 2, measured dropped == 0).  A mismatch
+		 * costs one undrawn band, not corruption, and the next keyframe
+		 * resyncs.
+		 */
+		for (i = 0; i < PUD_QOID_HISTORY; i++) {
+			const struct pud_qoid_slot *s = &pud->qoid_slots[i];
+
+			if (!s->len || s->x1 != band->x1 || s->x2 != band->x2 ||
+			    s->y1 != band->y1 || s->y2 != band->y2)
+				continue;
+			if (!best || s->serial > best->serial)
+				best = s;
+		}
+		if (best) {
+			dict = pud->qoid_hist_buf +
+			       (size_t)(best - pud->qoid_slots) * PUD_QOID_DICT_MAX;
+			dict_len = best->len;
+			dict_serial = best->serial;
+			keyframe = false;
+		}
+
+		rc = qoid_pack(pud->qoiz_buf, qoi_size, dict, dict_len,
+		               dict_serial, keyframe, out, capacity, out_size,
+		               pud->qoid_work);
+		if (rc)
+			return rc;
+
+		if (keyframe)
+			pud->qoid_keyframes++;
+		else
+			pud->qoid_deltas++;
+
+		/*
+		 * Keep the QOI stream for later bands, but do not let it be used
+		 * until the flush succeeds.  A band whose QOI stream is longer
+		 * than a dictionary may be is still worth remembering with a zero
+		 * length: the device gave it a serial either way, and our
+		 * numbering has to keep up with the device's.
+		 */
+		pud->qoid_pending.valid = true;
+		pud->qoid_pending.len =
+		        qoi_size <= PUD_QOID_DICT_MAX ? (u32)qoi_size : 0;
+		pud->qoid_pending.x1 = band->x1;
+		pud->qoid_pending.y1 = band->y1;
+		pud->qoid_pending.x2 = band->x2;
+		pud->qoid_pending.y2 = band->y2;
+
+		return 0;
 	}
 	default:
 		return -EOPNOTSUPP;
@@ -231,7 +344,7 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 			return;
 
 		encoded = 0;
-		ret = pud_encode_band(pud, width, height, &encoded);
+		ret = pud_encode_band(pud, &band, width, height, &encoded);
 		if (ret) {
 			if (ret == -EOPNOTSUPP)
 				drm_err_once(
@@ -256,6 +369,10 @@ static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
 			pud->needs_full_refresh = true;
 			return;
 		}
+
+		/* The band reached the device, so it has a serial now and its QOI
+		 * stream is in one of the device's windows. */
+		pud_qoid_commit(pud);
 	}
 }
 
@@ -745,6 +862,11 @@ static void pud_drm_release_buffers(struct pud *pud)
 	vfree(pud->qoiz_buf);
 	pud->qoiz_buf = NULL;
 	pud->qoiz_buf_size = 0;
+	vfree(pud->qoid_work);
+	pud->qoid_work = NULL;
+	vfree(pud->qoid_hist_buf);
+	pud->qoid_hist_buf = NULL;
+	pud->qoid_hist_size = 0;
 }
 
 /*
@@ -758,15 +880,42 @@ static void pud_drm_release_buffers(struct pud *pud)
  */
 int pud_drm_setup_encoder(struct pud *pud)
 {
-	if (pud->decoder_type != PUD_DECODER_QOIZ)
+	if (pud->decoder_type != PUD_DECODER_QOIZ &&
+	    pud->decoder_type != PUD_DECODER_QOID)
 		return 0;
 
+	/*
+	 * Both codecs are two-stage: QOI into qoiz_buf, then a second stage out
+	 * of it.  For QOIZ that is the kernel's deflate; for QOID it is tinyc,
+	 * which also needs the dictionary history and its own scratch.
+	 */
 	pud->qoiz_buf_size = rgb565_qoi_max_compressed_size(pud->max_band_pixels);
 	pud->qoiz_buf = vmalloc(pud->qoiz_buf_size);
-	pud->qoiz_strm = qoiz_stream_alloc();
-	if (!pud->qoiz_buf || !pud->qoiz_strm) {
-		qoiz_stream_free(pud->qoiz_strm);
-		pud->qoiz_strm = NULL;
+	if (!pud->qoiz_buf) {
+		pud->qoiz_buf_size = 0;
+		return -ENOMEM;
+	}
+
+	if (pud->decoder_type == PUD_DECODER_QOIZ) {
+		pud->qoiz_strm = qoiz_stream_alloc();
+		if (!pud->qoiz_strm) {
+			vfree(pud->qoiz_buf);
+			pud->qoiz_buf = NULL;
+			pud->qoiz_buf_size = 0;
+			return -ENOMEM;
+		}
+		return 0;
+	}
+
+	pud->qoid_hist_size = PUD_QOID_HISTORY * PUD_QOID_DICT_MAX;
+	pud->qoid_hist_buf = vzalloc(pud->qoid_hist_size);
+	pud->qoid_work = vzalloc(tinyc_work_size());
+	if (!pud->qoid_hist_buf || !pud->qoid_work) {
+		vfree(pud->qoid_work);
+		pud->qoid_work = NULL;
+		vfree(pud->qoid_hist_buf);
+		pud->qoid_hist_buf = NULL;
+		pud->qoid_hist_size = 0;
 		vfree(pud->qoiz_buf);
 		pud->qoiz_buf = NULL;
 		pud->qoiz_buf_size = 0;

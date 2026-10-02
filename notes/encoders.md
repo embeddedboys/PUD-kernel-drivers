@@ -21,6 +21,7 @@
 | `PUD_DECODER_QOI` = 3 | `qoi_encode_rgb565()` | 固件当前默认，真机验证 |
 | `PUD_DECODER_RLE` = 4 | `rle_encode_rgb565()` | **未上机验证**（固件当前 `DECODER_TYPE=3`） |
 | `PUD_DECODER_QOIZ` = 5 | QOI → 内核 raw deflate | QEMU 客户机验证，未在 RK3588 真机验证 |
+| `PUD_DECODER_QOID` = 6 | QOI → `tinyc`（固定 Huffman + 预设字典） | **策略 A**：序号乐观、不做 `GET_QOID` 查询；编码器宿主机闭环验证，未上机 |
 | `PUD_DECODER_TJPGD` = 0 / `JPEGDEC` = 1 / `LZ4` = 2 | — | DRM 路径报错并置 `needs_full_refresh` |
 
 为什么从 JPEG 改成 QOI：JPEGDEC 解码器的 MCU/crop 逻辑在 `x != 0` 的子图上会错位裁切，
@@ -55,6 +56,73 @@ drawn、`dropped`/`oversize` 为 0、线上字节数是纯 QOI 的 0.74 倍、�
 `rmmod` 干净。**没有**在 RK3588 真机上验证，也**没有**接过真实合成器的 damage 流。客户机里另有
 77 帧被设备判为坏数据，来自第一次 probe（那次 `GET_CAPS` 在模拟 xHCI 上超时，驱动退回默认的 QOI
 编码），重新加载之后就没再出现。
+
+## QOI + deflate + 跨帧字典（`PUD_DECODER_QOID` = 6）
+
+band 先 QOI 编码，再对那串 QOI 跑一次 raw deflate，**并把该矩形上一次发出去的 QOI 码流当作预设
+字典**，前面加一个 16 字节子头（`struct pud_qoid_header`：magic / flags / reserved / dict_serial /
+dict_len）。设备用它自己的 `tinyd` 解码，字典放在每个帧槽的窗口里。
+
+**内核自带的 zlib 做不了这一层**，两个硬约束都缺（已核实 `include/linux/zlib.h`）：
+
+- **没有 `Z_FIXED`**：设备侧的 `tinyd` 只解 stored 与**固定 Huffman** 块，动态 Huffman 直接报
+  `TINYD_ERR_FORMAT`。内核只提供 `Z_DEFAULT_STRATEGY`/`Z_FILTERED`/`Z_HUFFMAN_ONLY`，无法强制固定块。
+- **没有 `deflateSetDictionary`**：而跨帧字典正是这个编解码器的全部意义。
+
+所以自带 [`tinyc.c`](../tinyc.c)/[`tinyc.h`](../tinyc.h) —— 固件侧 `tinyd` 的**编码镜像**（同一套
+RFC 1951 表），只用固定 Huffman 与 stored 块、支持预设历史，两条路径取更小的那条。scratch
+（`tinyc_work_size()` ≈ **128 KB**，哈希链）与字典历史一起 `vzalloc`。
+
+### 序号与字典的对应关系（策略 A）
+
+设备给**每一笔被接受的条带**分配一个自增 serial，并记住哪个窗口持有它的 QOI；delta 用
+`dict_serial` 指名。驱动这边：
+
+- 自己记最近 `PUD_QOID_HISTORY`（= 3）条**同矩形**的 QOI 码流，delta 取其中 serial 最新的一条；
+  没有候选（或换矩形）就发**键帧**（`dict_serial = 0`）。
+- serial 由驱动自己数，**为真正 flush 成功的条带才消耗**（`pud_qoid_commit()`）。给一个设备没收到的
+  条带消耗序号，会让之后**每一笔** delta 都指错——而驱动看不到设备的计数器，会一路静默拒收。
+- 乐观之处：假定设备的计数与驱动一致。固件不变量 2 的 EP1 流控保证 `dropped == 0`，所以正常路径成立。
+  一旦漂移，代价是**那一笔不被绘制**（不是花屏），下一轮键帧即重新同步。
+- 环形缓冲**只在 flush 成功后写**：槽位元数据在提交前还描述着上一条带，提前写字节会让"元数据指向
+  A、字节是 B"，而设备会**照解不误**——那是花屏而不是拒收。
+
+### 分带预算受**窗口半宽**约束，不只是传输上限（真机踩过）
+
+`max_band_pixels` 原来只按传输上限算（`(frame_max-12-16)/3` = 21835），这对 6 是**错的**：设备把每条带
+解进 `win[dict_len .. dict_len + PUD_DELTA_WIN/2)`，所以**本条带的 QOI 流本身**也必须 ≤ 16384 B。
+超了设备整条丢弃并计 `g_decoder_stat_qoid_oversize`——**驱动看不到**，那块面板就静默停止更新。
+
+真机现象：**kiosk 正常、切到 GNOME 后整块黑**。原因是 cage 只报小块 damage（每条带 QOI 都小于半窗，
+`qoid_oversize == 0`），而 Xorg 首次提交是**整屏 480×320**，QOI 远超 16384 → 每条都被丢。
+计数器上是 `submitted/drawn` 各 80、`qoid_oversize=7`。
+
+修法（`usb.c`，`decoder_type == 6` 时再收一次）：
+
+```c
+u32 fit = (PUD_QOID_DICT_MAX - 16) / 3;   /* 16384 B → 5456 px，QOI 最坏 3 B/px + 16 B 框架 */
+if (pud->max_band_pixels > fit)
+        pud->max_band_pixels = fit;
+```
+
+`qoid_pack()` 另加 `qoi_len > PUD_QOID_DICT_MAX → -E2BIG`，让这类错误在**驱动侧可见**，而不是被设备
+静默丢掉。修后真机实测：强制一次 modeset 的 30 条带**全部绘制、`qoid_oversize` 零新增**。
+
+代价：整屏刷新时带数 8 → 30。要省回来可以改成**自适应**——先按大带编码，超半窗再对半拆重编，
+只有复杂内容才拆；现在用的是保守的固定收窄。
+
+已知缺口：设备的 `PUD_DELTA_WIN` 与 `DECODER_FRAME_SLOTS` **都不在 `PUD_CMD_GET_CAPS` 里**，驱动按
+RP2350 的 32768/3 写死（`PUD_QOID_DELTA_WIN`/`PUD_QOID_HISTORY`）。RP2040 构型的窗口只有一半，
+字典超长会被设备拒（`g_decoder_stat_qoid_oversize`，主机看不到）。要正经支持两块板，得让它上报，
+或改用 `PUD_CMD_GET_QOID`（一次约 2.9 ms，见固件仓 `notes/qoid.md`）。
+
+状态（2026-10-02）：编码器在宿主机闭环验证——3000 次随机（随机字典 × 随机数据 × 4 种熵、ASan/UBSan）
+经 `tinyd` 全部还原；无匹配可用时与 zlib `Z_FIXED` 逐字节一致；端到端载荷模拟通过，同一条带键帧
+514 B、对上一次的 delta 270 B。
+**已上机（RK3588，内核 6.1.172）**：kiosk（cage/Wayland）连续渲染 4490 条带，`qoid_bad == 0`
+（全部码流被设备解出）、`dropped == 0`、`qoid_mismatch` 稳定在 4（启动瞬态）、`qoid_oversize == 0`。
+**未验证**：GNOME 会话。另外注意 **GNOME 跑 X11 时不会往这块面板呈现**（Xorg 配好了输出却不提交帧），
+Wayland 会话才走 cage 那样的 atomic + damage 路径。
 
 ## JPEG 路径的限制
 
