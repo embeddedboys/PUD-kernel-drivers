@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""protoctl -- report and cross-check the PUD USB protocol constants.
+
+This is a TOOL, not a test: it extracts facts from the driver source and checks
+that those facts are internally consistent. It never decides PASS/FAIL about the
+project's behaviour; tests own the oracles (see tests/README.md).
+
+Sources it reads (read-only): pud.h, usb.c.
+
+    protoctl fields [--json]        parsed #defines, struct sizes, band maths
+    protoctl band --frame-max N [--usb-max M] [--json]
+    protoctl check [--json]         internal consistency of pud.h
+
+Exit codes (workspace convention):
+    0 OK   1 FAIL   2 INVALID_USAGE   3 ENVIRONMENT_ERROR
+"""
+
+import argparse
+import json
+import os
+import re
+import struct
+import sys
+
+VERSION = "1.0.0"
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_ENV = 0, 1, 2, 3
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PUD_H = os.path.join(REPO, "pud.h")
+
+# Type width in bytes; natural alignment is assumed to be the same as the
+# width, which holds for the integer types used in the protocol structs.
+TYPE_SIZE = {
+    "u8": 1, "u16": 2, "u32": 4, "u64": 8,
+    "__u8": 1, "__u16": 2, "__u32": 4, "__u64": 8,
+    "unsigned char": 1, "unsigned short": 2, "unsigned int": 4,
+}
+
+DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+?)\s*$")
+STRUCT_RE = re.compile(r"struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\};", re.S)
+FIELD_RE = re.compile(
+    r"^\s*(u8|u16|u32|u64|__u8|__u16|__u32|__u64|unsigned\s+char|"
+    r"unsigned\s+short|unsigned\s+int)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*\[\s*(\d+)\s*\])?\s*;",
+    re.M,
+)
+
+
+def read(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        print(f"protoctl: cannot read {path}: {exc}", file=sys.stderr)
+        sys.exit(EXIT_ENV)
+
+
+def parse_defines(text):
+    # Join C line continuations first: PUD_DEFAULT_BAND_PIXELS is spelled as a
+    # multi-line #define, and matching line by line would capture just the
+    # trailing backslash as its value.
+    text = re.sub(r"\\\s*\n\s*", " ", text)
+    defines = {}
+    for line in text.splitlines():
+        m = DEFINE_RE.match(line)
+        if not m:
+            continue
+        name, value = m.group(1), m.group(2).split("/*")[0].split("//")[0].strip()
+        defines[name] = value
+    return defines
+
+
+def eval_int(expr, defines, _depth=0):
+    """Evaluate a simple #define expression (integers, arithmetic, min/max)."""
+
+    if _depth > 20:
+        raise ValueError("expression too deep")
+    expr = expr.strip()
+    if expr in defines:
+        return eval_int(defines[expr], defines, _depth + 1)
+    m = re.fullmatch(r"min\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)", expr)
+    if m:
+        return min(eval_int(m.group(1), defines, _depth + 1),
+                   eval_int(m.group(2), defines, _depth + 1))
+    m = re.fullmatch(r"max\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)", expr)
+    if m:
+        return max(eval_int(m.group(1), defines, _depth + 1),
+                   eval_int(m.group(2), defines, _depth + 1))
+    # expand identifiers from defines, then let Python do the arithmetic.
+    # The lookbehind keeps the "x" of a hex literal (0x43445550) from being
+    # treated as an identifier.
+    safe = re.sub(r"(?<![0-9A-Za-z_])([A-Za-z_][A-Za-z0-9_]*)",
+                  lambda mm: str(eval_int(mm.group(0), defines, _depth + 1)),
+                  expr)
+    if not re.fullmatch(r"[0-9xXa-fA-F()\s+\-*/%<>&|~^]+", safe):
+        raise ValueError(f"unsupported expression: {expr}")
+    return int(eval(safe, {"__builtins__": {}}, {}))
+
+
+def struct_layout(body):
+    """Return (size, fields) for a struct body, using natural alignment."""
+    fields = []
+    offset = 0
+    max_align = 1
+    for m in FIELD_RE.finditer(body):
+        tsize = TYPE_SIZE[m.group(1)]
+        count = int(m.group(3)) if m.group(3) else 1
+        align = tsize
+        offset = (offset + align - 1) // align * align
+        fields.append({"name": m.group(2), "type": m.group(1),
+                       "count": count, "offset": offset,
+                       "size": tsize * count})
+        offset += tsize * count
+        max_align = max(max_align, align)
+    size = (offset + max_align - 1) // max_align * max_align
+    return size, fields
+
+
+def parse_structs(text):
+    out = {}
+    for m in STRUCT_RE.finditer(text):
+        size, fields = struct_layout(m.group(2))
+        out[m.group(1)] = {"size": size, "fields": fields}
+    return out
+
+
+def gather():
+    text = read(PUD_H)
+    defines = parse_defines(text)
+    structs = parse_structs(text)
+    return defines, structs
+
+
+def const(defines, name):
+    if name not in defines:
+        raise KeyError(name)
+    return eval_int(defines[name], defines)
+
+
+def band_pixels(frame_max, usb_max, header, framing):
+    return (min(usb_max, frame_max) - header - framing) // 3
+
+
+def cmd_fields(args):
+    defines, structs = gather()
+    body = {"tool": "protoctl", "version": VERSION, "source": "pud.h",
+            "defines": {}, "structs": {}}
+    want = ["USB_TRANS_MAX_SIZE", "PUD_EP1_HEADER_SIZE",
+            "PUD_DEFAULT_BAND_PIXELS", "PUD_CAPS_MAGIC", "PUD_PROTO_VER",
+            "PUD_CAPS_V1_SIZE", "PUD_CAPS_TOUCH", "PUD_TOUCH_VERSION",
+            "PUD_TOUCH_REPORT_SIZE", "TYPE_VENDOR",
+            "REQ_EP0_OUT", "REQ_EP0_IN", "REQ_EP1_OUT", "REQ_EP2_IN",
+            "REQ_EP4_IN", "PUD_CMD_GET_SN", "PUD_CMD_GET_CAPS",
+            "PUD_DECODER_TJPGD", "PUD_DECODER_JPEGDEC", "PUD_DECODER_LZ4",
+            "PUD_DECODER_QOI", "PUD_DECODER_RLE", "PUD_DECODER_QOIZ"]
+    for name in want:
+        if name in defines:
+            try:
+                body["defines"][name] = const(defines, name)
+            except (ValueError, KeyError):
+                body["defines"][name] = defines[name]
+    for sname in ("pud_ep1_header", "pud_caps"):
+        if sname in structs:
+            body["structs"][sname] = {
+                "size": structs[sname]["size"],
+                "fields": [{"name": f["name"], "type": f["type"],
+                            "offset": f["offset"]} for f in
+                           structs[sname]["fields"]],
+            }
+    usb_max = const(defines, "USB_TRANS_MAX_SIZE")
+    header = const(defines, "PUD_EP1_HEADER_SIZE")
+    body["band"] = {
+        "formula": "(min(USB_TRANS_MAX_SIZE, frame_max) - header - 16) / 3",
+        "default_band_pixels": band_pixels(usb_max, usb_max, header, 16),
+        "pud_default_band_pixels_define":
+            const(defines, "PUD_DEFAULT_BAND_PIXELS"),
+        "rp2350_frame_max": 65536,
+        "rp2350_band_pixels": band_pixels(65536, usb_max, header, 16),
+    }
+    vid_pid = re.search(r"USB_DEVICE\w*\(\s*(0x[0-9A-Fa-f]+)\s*,\s*"
+                        r"(0x[0-9A-Fa-f]+)", read(os.path.join(REPO, "usb.c")))
+    if vid_pid:
+        body["vid_pid"] = [int(vid_pid.group(1), 16), int(vid_pid.group(2), 16)]
+
+    if args.json:
+        print(json.dumps(body, indent=2))
+        return EXIT_OK
+    for k, v in body["defines"].items():
+        print(f"{k:28} {v}")
+    for sname, s in body["structs"].items():
+        print(f"struct {sname:20} size={s['size']}")
+    print(f"{'band.default':28} {body['band']['default_band_pixels']}")
+    return EXIT_OK
+
+
+def cmd_band(args):
+    defines, _ = gather()
+    usb_max = args.usb_max if args.usb_max is not None \
+        else const(defines, "USB_TRANS_MAX_SIZE")
+    header = const(defines, "PUD_EP1_HEADER_SIZE")
+    if args.frame_max <= 0 or usb_max <= 0:
+        print("protoctl: frame-max/usb-max must be positive", file=sys.stderr)
+        return EXIT_USAGE
+    pixels = band_pixels(args.frame_max, usb_max, header, 16)
+    out = {"tool": "protoctl", "version": VERSION,
+           "observation": {"usb_trans_max_size": usb_max,
+                           "ep1_header_size": header,
+                           "frame_max": args.frame_max,
+                           "framing_bytes": 16,
+                           "bytes_per_pixel_worst_case": 3,
+                           "band_pixels": pixels}}
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"band_pixels {pixels}")
+    return EXIT_OK
+
+
+def check_invariants(defines, structs):
+    checks = []
+
+    def add(name, ok, detail):
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    usb_max = const(defines, "USB_TRANS_MAX_SIZE")
+    header = const(defines, "PUD_EP1_HEADER_SIZE")
+    default_band = const(defines, "PUD_DEFAULT_BAND_PIXELS")
+    caps_v1 = const(defines, "PUD_CAPS_V1_SIZE")
+    expected = (usb_max - header - 16) // 3
+    add("default_band_formula", default_band == expected,
+        f"PUD_DEFAULT_BAND_PIXELS={default_band} formula={expected}")
+
+    ep1_size = structs.get("pud_ep1_header", {}).get("size")
+    add("ep1_header_size", ep1_size == header,
+        f"sizeof(struct pud_ep1_header)={ep1_size} PUD_EP1_HEADER_SIZE={header}")
+
+    caps_size = structs.get("pud_caps", {}).get("size")
+    add("caps_size_is_2x_v1", caps_size == 2 * caps_v1,
+        f"sizeof(struct pud_caps)={caps_size} 2*PUD_CAPS_V1_SIZE={2 * caps_v1}")
+
+    magic = const(defines, "PUD_CAPS_MAGIC")
+    spelled = struct.pack("<I", magic).decode("ascii", "replace")
+    add("caps_magic_spells_PUDC", spelled == "PUDC",
+        f"0x{magic:08x} -> {spelled!r}")
+
+    decoders = [const(defines, n) for n in
+                ("PUD_DECODER_TJPGD", "PUD_DECODER_JPEGDEC", "PUD_DECODER_LZ4",
+                 "PUD_DECODER_QOI", "PUD_DECODER_RLE", "PUD_DECODER_QOIZ")]
+    add("decoder_numbers_unique", len(set(decoders)) == len(decoders),
+        f"values={decoders}")
+
+    reqs = [const(defines, n) for n in
+            ("REQ_EP0_OUT", "REQ_EP0_IN", "REQ_EP1_OUT", "REQ_EP2_IN",
+             "REQ_EP4_IN")]
+    add("request_numbers_unique", len(set(reqs)) == len(reqs),
+        f"values={[hex(r) for r in reqs]}")
+
+    touch_size = const(defines, "PUD_TOUCH_REPORT_SIZE")
+    add("touch_report_size_8", touch_size == 8,
+        f"PUD_TOUCH_REPORT_SIZE={touch_size}")
+    return checks
+
+
+def cmd_check(args):
+    defines, structs = gather()
+    checks = check_invariants(defines, structs)
+    failed = [c for c in checks if not c["ok"]]
+    status = "PASS" if not failed else "FAIL"
+    if args.json:
+        print(json.dumps({"tool": "protoctl", "version": VERSION,
+                          "status": status, "checks": checks}, indent=2))
+    else:
+        for c in checks:
+            print(f"[{'PASS' if c['ok'] else 'FAIL'}] {c['name']}: {c['detail']}")
+        print(f"[RESULT] {status}")
+    return EXIT_OK if not failed else EXIT_FAIL
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="protoctl", description="PUD protocol constant inspector")
+    parser.add_argument("--version", action="version",
+                        version=f"protoctl {VERSION}")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_fields = sub.add_parser("fields", help="dump parsed constants")
+    p_fields.add_argument("--json", action="store_true")
+    p_fields.set_defaults(func=cmd_fields)
+
+    p_band = sub.add_parser("band", help="compute band pixels")
+    p_band.add_argument("--frame-max", type=int, required=True)
+    p_band.add_argument("--usb-max", type=int, default=None)
+    p_band.add_argument("--json", action="store_true")
+    p_band.set_defaults(func=cmd_band)
+
+    p_check = sub.add_parser("check", help="internal consistency of pud.h")
+    p_check.add_argument("--json", action="store_true")
+    p_check.set_defaults(func=cmd_check)
+
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help(sys.stderr)
+        return EXIT_USAGE
+    try:
+        return args.func(args)
+    except (KeyError, ValueError) as exc:
+        print(f"protoctl: {exc}", file=sys.stderr)
+        return EXIT_ENV
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

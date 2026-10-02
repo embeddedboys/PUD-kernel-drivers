@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""usbmonctl -- capture and parse usbmon traffic.
+
+This is a TOOL, not a test: capture needs root and debugfs, parse is offline.
+It reports facts (event counts, sizes, intervals) and never decides PASS/FAIL;
+tests own the oracles (see tests/README.md).
+
+    usbmonctl capture --output FILE [--bus N] [--timeout S] [--json]
+    usbmonctl parse FILE [--json]
+
+`parse` implements exactly the filters documented in notes/usbmon.md, so a test
+can use structured output instead of fragile text parsing.
+
+Exit codes (workspace convention):
+    0 OK   1 FAIL   2 INVALID_USAGE   3 ENVIRONMENT_ERROR   4 TIMEOUT
+"""
+
+import argparse
+import json
+import os
+import select
+import statistics
+import sys
+
+VERSION = "1.0.0"
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_ENV, EXIT_TIMEOUT = 0, 1, 2, 3, 4
+
+USBMON_DIR = "/sys/kernel/debug/usb/usbmon"
+
+
+def parse_line(line):
+    """Return a dict for one usbmon line, or None when it is not a data line.
+
+    Fields: <tag> <ts_us> <S|C|E> <type><dir>:<bus>:<dev>:<ep> <status> <len>
+    [= <hex bytes ...>]
+    """
+    parts = line.split()
+    if len(parts) < 6:
+        return None
+    tag, ts, ev, addr, status, length = parts[:6]
+    if ev not in ("S", "C", "E"):
+        return None
+    m = addr.split(":")
+    if len(m) != 4:
+        return None
+    etype, bus, dev, ep = m
+    try:
+        rec = {
+            "tag": tag,
+            "timestamp_us": int(ts),
+            "event": ev,
+            "type": etype,
+            "bus": bus,
+            "dev": dev,
+            "ep": ep,
+            "status": int(status),
+            "length": int(length),
+            "has_data": len(parts) > 6 and parts[6] == "=",
+            "endpoint": f"{etype}:{bus}:{dev}:{ep}",
+        }
+    except ValueError:
+        return None
+    return rec
+
+
+def parse_file(path):
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                rec = parse_line(line)
+                if rec:
+                    events.append(rec)
+    except OSError as exc:
+        raise EnvironmentError(f"cannot read {path}: {exc}")
+    return events
+
+
+def summarize(events):
+    c_events = [e for e in events if e["event"] == "C"]
+    by_ep = {}
+    for e in c_events:
+        slot = by_ep.setdefault(e["endpoint"], {"count": 0, "bytes": 0,
+                                                 "lengths": [], "errors": 0})
+        slot["count"] += 1
+        slot["bytes"] += e["length"]
+        slot["lengths"].append(e["length"])
+        if e["status"] != 0:
+            slot["errors"] += 1
+
+    endpoints = {}
+    for ep, slot in sorted(by_ep.items()):
+        lengths = slot["lengths"]
+        endpoints[ep] = {
+            "completions": slot["count"],
+            "bytes": slot["bytes"],
+            "errors": slot["errors"],
+            "length_min": min(lengths) if lengths else None,
+            "length_max": max(lengths) if lengths else None,
+            "length_median": statistics.median(lengths) if lengths else None,
+            "length_histogram": {str(k): lengths.count(k)
+                                 for k in sorted(set(lengths))},
+        }
+
+    def intervals(ep):
+        ts = [e["timestamp_us"] for e in c_events if e["endpoint"] == ep]
+        return [round((b - a) / 1000.0, 3) for a, b in zip(ts, ts[1:])]
+
+    ep1 = [ep for ep in by_ep if ep.startswith("Bo:") and ep.endswith(":1")]
+    ep4 = [ep for ep in by_ep if ep.startswith("Ii:") and ep.endswith(":4")]
+
+    summary = {
+        "events_total": len(events),
+        "submitted": sum(1 for e in events if e["event"] == "S"),
+        "completions": len(c_events),
+        "submit_failed": sum(1 for e in events if e["event"] == "E"),
+        "duration_ms": (round((events[-1]["timestamp_us"] -
+                               events[0]["timestamp_us"]) / 1000.0, 3)
+                        if len(events) > 1 else 0.0),
+        "endpoints": endpoints,
+    }
+    if ep1:
+        summary["ep1_intervals_ms"] = intervals(ep1[0])
+    if ep4:
+        summary["ep4_intervals_ms"] = intervals(ep4[0])
+    summary["completion_errors"] = [
+        {"endpoint": e["endpoint"], "status": e["status"],
+         "length": e["length"]}
+        for e in c_events if e["status"] != 0
+    ]
+    return summary
+
+
+def cmd_parse(args):
+    try:
+        events = parse_file(args.file)
+    except EnvironmentError as exc:
+        print(f"usbmonctl: {exc}", file=sys.stderr)
+        return EXIT_ENV
+    if not events:
+        print(f"usbmonctl: no usbmon events in {args.file}", file=sys.stderr)
+        return EXIT_ENV
+    summary = summarize(events)
+    body = {"tool": "usbmonctl", "version": VERSION, "status": "ok",
+            "file": args.file, "observation": summary}
+    if args.json:
+        print(json.dumps(body, indent=2))
+        return EXIT_OK
+    print(f"events       : {summary['events_total']} "
+          f"(S {summary['submitted']}, C {summary['completions']}, "
+          f"E {summary['submit_failed']})")
+    print(f"duration_ms  : {summary['duration_ms']}")
+    for ep, s in summary["endpoints"].items():
+        print(f"  {ep:14} completions={s['completions']:6} "
+              f"bytes={s['bytes']:9} len min/median/max="
+              f"{s['length_min']}/{s['length_median']}/{s['length_max']} "
+              f"errors={s['errors']}")
+    if summary["completion_errors"]:
+        print(f"completion errors: {len(summary['completion_errors'])}")
+    return EXIT_OK
+
+
+def cmd_capture(args):
+    if not os.path.isdir(USBMON_DIR):
+        print(f"usbmonctl: {USBMON_DIR} is not present; mount debugfs and "
+              f"'modprobe usbmon'", file=sys.stderr)
+        return EXIT_ENV
+    if os.geteuid() != 0 and not os.access(os.path.join(USBMON_DIR, "0u"),
+                                           os.R_OK):
+        print("usbmonctl: reading usbmon needs root", file=sys.stderr)
+        return EXIT_ENV
+    bus = args.bus if args.bus is not None else "0"
+    path = os.path.join(USBMON_DIR, f"{bus}u")
+    if not os.path.exists(path):
+        print(f"usbmonctl: {path} does not exist", file=sys.stderr)
+        return EXIT_ENV
+    if args.timeout <= 0:
+        print("usbmonctl: --timeout must be positive", file=sys.stderr)
+        return EXIT_USAGE
+
+    lines = 0
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with open(args.output, "w", encoding="utf-8") as out:
+            while True:
+                ready, _, _ = select.select([fd], [], [], args.timeout)
+                if not ready:
+                    break
+                try:
+                    chunk = os.read(fd, 1 << 20)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", "replace")
+                out.write(text)
+                lines += text.count("\n")
+    except OSError as exc:
+        print(f"usbmonctl: {exc}", file=sys.stderr)
+        return EXIT_ENV
+    finally:
+        try:
+            os.close(fd)
+        except (OSError, NameError):
+            pass
+
+    body = {"tool": "usbmonctl", "version": VERSION, "status": "ok",
+            "observation": {"output": args.output, "bus": int(bus),
+                            "timeout_s": args.timeout, "lines": lines}}
+    if args.json:
+        print(json.dumps(body, indent=2))
+    else:
+        print(f"captured {lines} lines from {path} to {args.output}")
+    if lines == 0:
+        print("usbmonctl: warning: captured nothing (was the capture armed "
+              "before the action?)", file=sys.stderr)
+    return EXIT_OK
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="usbmonctl", description="usbmon capture and parser")
+    parser.add_argument("--version", action="version",
+                        version=f"usbmonctl {VERSION}")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("capture", help="capture usbmon text to a file")
+    p.add_argument("--output", "-o", required=True)
+    p.add_argument("--bus", type=int, default=None,
+                   help="bus number (default: 0, all buses)")
+    p.add_argument("--timeout", type=float, default=10.0,
+                   help="seconds of silence before stopping")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_capture)
+
+    p = sub.add_parser("parse", help="summarize a usbmon text file")
+    p.add_argument("file")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_parse)
+
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help(sys.stderr)
+        return EXIT_USAGE
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

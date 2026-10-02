@@ -1,28 +1,31 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Demo/stress: draw random strings on a framebuffer forever, to watch a live
+# display or usbmon traffic.  This is NOT part of run_tests.py -- it has no
+# oracle and never reports PASS/FAIL.
+#
+#   tests/random_str.sh [fb-index]
+#
+# Needs /dev/fbN on the machine running it (board or `make qemu` guest).
+HERE=$(cd "$(dirname "$0")" && pwd)
+FBCTL=$HERE/../tools/fbctl
+FB=${1:-0}
 
-# 屏幕分辨率，可以改成你 fb 的实际分辨率
-SCREEN_W=480
-SCREEN_H=320
+[ -x "$FBCTL" ] || { echo "build it first: make -C $HERE/../tools" >&2; exit 3; }
 
-# 测试字符串列表
+# Read the real geometry instead of assuming a resolution.
+read -r SCREEN_W SCREEN_H < <("$FBCTL" info --fd "$FB" --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["observation"]; print(d["xres"], d["yres"])') || exit 3
+
 rand_str() {
-    # 生成 20~80 长度的随机字符串
-    LEN=$((480 + RANDOM % 640))
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c $LEN
+    local len=$((20 + RANDOM % 60))
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
 }
 
 while true; do
-    # 随机坐标
     X=$((RANDOM % SCREEN_W))
     Y=$((RANDOM % SCREEN_H))
-
-    # 随机字符串
-    STR=$(rand_str)
-
-    # 执行绘制
-    ./test_fb "$X" "$Y" "$STR"
-
-    # 间隔 0.1 秒（可调快/慢）
+    "$FBCTL" text "$X" "$Y" "$(rand_str)" --fd "$FB" --quiet
     sleep 0.1
 done
-
