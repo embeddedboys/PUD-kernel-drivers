@@ -200,6 +200,24 @@ v1 是"EP0 窗口协商 + EP1 数据"两次传输，控制请求失败却继续�
 （`if (data_size % 2) data_size += 1;`）—— 设备奇偶都收，取偶只为兼容 2026-09 之前会拒绝
 奇数 `size` 的老固件，见 [usb-protocol.md](usb-protocol.md) 的"`size` 的奇偶"。
 
+### 2.4 `USB_DEVICE()` 会匹配设备的**每一个**接口（2026-09-30 修）
+
+`pud_ids[]` 里原来是 `USB_DEVICE(0x2E8A, 0x0001)`（只按 VID/PID 匹配），而 USB 核心是
+**按接口**跑 probe 的：固件现在有两个接口（接口 0 是图像端点，接口 1 是 2026-09 加的
+picoboot reset 接口，class 0xFF / proto 1、**没有端点**），于是 probe 跑了两次，注册出
+**第二块 DRM card**。它永远 enable 不起来，而且它的编码路径照样会往**同一个 EP1** 发数据
+（`pud_flush()` 用的是 `usb_sndbulkpipe(udev, EP1_OUT_ADDR)`，跟接口无关）。
+
+QEMU 客户机里的样子：`card0-USB-1: connected enabled` + `card1-USB-2: connected disabled`，
+两块 fb 都叫 `pud-drmdrmfb`，写其中一块发的帧设备照收。更阴的是**两块 card 的能力报告
+可以不一样**：客户机第一次 probe 的 `GET_CAPS` 超时（模拟 xHCI 的已知毛病），那个实例就
+退回默认的 QOI 编码 —— 于是同一台设备同时收到 QOI 和 QOI+deflate 两种流，设备侧
+`g_decoder_stat_qoiz_bad` 全是 QOI 那部分贡献的（实测 78 帧全被判坏数据，看起来像新编码
+"完全不工作"）。
+
+修法：`{ USB_DEVICE_INTERFACE_NUMBER(0x2E8A, 0x0001, 0) }`。接口 0 从第一版固件起就是
+图像接口，所以老设备不受影响。
+
 ---
 
 ## 三、DRM / 显示接口

@@ -211,7 +211,7 @@ struct pud_caps {
     u32 magic;          /* PUD_CAPS_MAGIC = 0x43445550 ("PUDC") */
     u32 proto_ver;      /* PUD_PROTO_VER = 2（固件与驱动必须一致） */
     u32 frame_max;      /* 单次 EP1 传输上限（含 12 B header）：RP2350 65536 / RP2040 32768 */
-    u32 decoder_type;   /* PUD_DECODER_*: 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE */
+    u32 decoder_type;   /* PUD_DECODER_*: 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE, 5 QOI+deflate */
 
     /* 前 16 字节之后的字段是后来追加的；只回 16 字节的老固件仍然合法。 */
     u16 xres;           /* 面板在它被驱动的坐标系下的尺寸 */
@@ -234,10 +234,11 @@ struct pud_caps {
 - `pud_apply_caps()` 把结果落到 `pud->frame_max` / `pud->max_band_pixels`
   （= `(min(USB_TRANS_MAX_SIZE, frame_max) - 12 - 16) / 3`，QOI 最坏 3 B/px + 16 B 头尾
   + 12 B EP1 header），`pud_fb_dirty()` 用它算 `rows`。
-- `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE；
+- `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE，
+  5 → QOI + raw deflate（设备把每个传输 inflate 回 QOI 码流再解码，EP1 帧格式不变）；
   0/1/2 目前会报错并置 `needs_full_refresh`（见
   [display-and-refresh.md](display-and-refresh.md)）。设备没报能力时按 QOI（固件默认）。
-  这个数字是协议字段，**不要重排**。
+  这个数字是协议字段，**不要重排**；5 是追加的值，老固件不会报它。
 - **面板参数也来自这里**（`pud_caps_to_display()`）：分辨率、旋转、bpp、总线时钟都写进
   每台设备自己的 `pud->display_data`（`pud->display` 指向它），DRM mode 与输入设备的
   轴范围都由它推出来 —— 驱动里**不再有写死的 480×320**。查询发生在后端分配之前

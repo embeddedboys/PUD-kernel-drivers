@@ -98,13 +98,16 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 /*
  * Frame encoding / refresh policy.
  *
- * Frames are encoded with RGB565 QOI or RGB565 RLE -- whichever the device
- * reports it decodes (PUD_CMD_GET_CAPS -> decoder_type), because pushing QOI at
- * an RLE firmware (or the other way around) only produces dropped frames.  Both
- * are lossless and fast to encode, and the firmware decodes arbitrary partial
- * windows correctly (unlike the JPEGDEC path whose MCU/crop logic mis-clips a
- * sub-image decoded at x != 0 and could wedge the display under load).  So the
- * damage rectangle is sent as-is: small, lossless and fast.
+ * Frames are encoded with RGB565 QOI, RGB565 RLE or QOI+deflate -- whichever the
+ * device reports it decodes (PUD_CMD_GET_CAPS -> decoder_type), because pushing
+ * QOI at an RLE firmware (or the other way around) only produces dropped frames.
+ * All three are lossless and fast to encode, and the firmware decodes arbitrary
+ * partial windows correctly (unlike the JPEGDEC path whose MCU/crop logic
+ * mis-clips a sub-image decoded at x != 0 and could wedge the display under
+ * load).  So the damage rectangle is sent as-is: small, lossless and fast.
+ *
+ * QOI+deflate is QOI followed by the kernel's own raw deflate over the QOI
+ * stream (see qoiz_deflate()); it only exists when the device reports it.
  *
  * A rectangle whose stream might not fit the USB transfer limit is split into
  * horizontal bands and each band is encoded and flushed on its own. Both
@@ -128,6 +131,24 @@ static int pud_encode_band(struct pud *pud, unsigned int width,
 	case PUD_DECODER_RLE:
 		return rle_encode_rgb565((u8 *)pud->tx_buf, width, height,
 		                         capacity, out, out_size);
+	case PUD_DECODER_QOIZ: {
+		size_t qoi_size;
+		int rc;
+
+		if (!pud->qoiz_strm)
+			return -EOPNOTSUPP;
+
+		/* QOI into the side buffer, then deflate from there into the
+		 * transfer buffer.  The deflate output is checked against the
+		 * transfer limit by the caller, like every other codec's. */
+		rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
+		                       pud->qoiz_buf_size, pud->qoiz_buf,
+		                       &qoi_size);
+		if (rc)
+			return rc;
+		return qoiz_deflate(pud->qoiz_strm, pud->qoiz_buf, qoi_size, out,
+		                    capacity, out_size);
+	}
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -557,6 +578,40 @@ static void pud_drm_release_buffers(struct pud *pud)
 		vfree(pud->tx_buf);
 		pud->tx_buf = NULL;
 	}
+	qoiz_stream_free(pud->qoiz_strm);
+	pud->qoiz_strm = NULL;
+	vfree(pud->qoiz_buf);
+	pud->qoiz_buf = NULL;
+	pud->qoiz_buf_size = 0;
+}
+
+/*
+ * The QOI+deflate encoder's state, for a device that reports it decodes that.
+ * It has to wait for the capability report (pud_drm_alloc() runs before it), so
+ * pud_drm_setup() calls this once the report is applied.  The QOI side buffer
+ * holds the worst case of one band, which is what one transfer may carry.
+ *
+ * A failure fails the probe.  Falling back to plain QOI is not an option: that
+ * firmware inflates every transfer, so QOI sent to it is dropped as corrupt.
+ */
+int pud_drm_setup_encoder(struct pud *pud)
+{
+	if (pud->decoder_type != PUD_DECODER_QOIZ)
+		return 0;
+
+	pud->qoiz_buf_size = rgb565_qoi_max_compressed_size(pud->max_band_pixels);
+	pud->qoiz_buf = vmalloc(pud->qoiz_buf_size);
+	pud->qoiz_strm = qoiz_stream_alloc();
+	if (!pud->qoiz_buf || !pud->qoiz_strm) {
+		qoiz_stream_free(pud->qoiz_strm);
+		pud->qoiz_strm = NULL;
+		vfree(pud->qoiz_buf);
+		pud->qoiz_buf = NULL;
+		pud->qoiz_buf_size = 0;
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 struct drm_device *pud_drm_alloc(struct device *dev,

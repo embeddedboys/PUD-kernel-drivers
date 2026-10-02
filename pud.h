@@ -89,6 +89,10 @@ struct pud_ep1_header {
 #define PUD_DECODER_LZ4 2
 #define PUD_DECODER_QOI 3
 #define PUD_DECODER_RLE 4
+/* QOI, then raw deflate (RFC 1951, no zlib header) over the QOI stream.  The
+ * device inflates each transfer back to the QOI stream and QOI-decodes it.
+ * Experimental on the firmware side (RP2350 only). */
+#define PUD_DECODER_QOIZ 5
 
 struct pud_caps {
 	u32 magic;
@@ -211,6 +215,12 @@ struct pud {
 	dma_addr_t encoder_dma;
 	size_t encoder_buf_size;
 	u8 encoder_quality;
+	/* PUD_DECODER_QOIZ only (NULL otherwise): each band is QOI-encoded into
+	 * qoiz_buf and deflated from there into encoder_buf; qoiz_strm owns the
+	 * deflate workspace.  Both are CPU-only, so vmalloc is fine. */
+	u8 *qoiz_buf;
+	size_t qoiz_buf_size;
+	struct z_stream_s *qoiz_strm;
 
 	/* DRM specific data */
 	u16 *tx_buf;
@@ -265,6 +275,7 @@ int pud_unregister_framebuffer(struct fb_info *info);
 struct drm_device *pud_drm_alloc(struct device *dev,
                                  const struct pud_caps *caps, int caps_len);
 void pud_drm_release(struct drm_device *drm);
+int pud_drm_setup_encoder(struct pud *pud);
 int pud_drm_register(struct drm_device *drm);
 void pud_drm_unregister(struct drm_device *drm);
 
