@@ -60,3 +60,7 @@ build/
 
 # python venv (tooling, e.g. virtme-ng)
 .venv/
+
+# Python bytecode (tests/ and tools/ are Python now)
+__pycache__/
+*.py[cod]
