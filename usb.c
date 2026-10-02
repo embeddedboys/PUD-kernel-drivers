@@ -523,6 +523,14 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 	pud->dev = dev;
 	pud_apply_caps(pud, caps, caps_len);
 
+	/* the encoder may need state that depends on what the device decodes */
+	rc = pud_drm_setup_encoder(pud);
+	if (rc) {
+		dev_err(dev, "no memory for the decoder_type %u encoder: %d\n",
+		        pud->decoder_type, rc);
+		goto err_free_drm;
+	}
+
 	usb_set_intfdata(intf, pud);
 
 	rc = pud_drm_register(drm);
