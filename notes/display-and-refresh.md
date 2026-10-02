@@ -121,11 +121,16 @@ adler32，设备要的就是 raw）、`memLevel 6`。相对纯 QOI 的字节数�
 每个传输都做 inflate，给它发 QOI 等于每帧都被丢掉（设备侧 `g_decoder_stat_qoiz_bad` 会
 一直涨）。释放挂在 `pud_drm_release_buffers()` 上（正常拔插走 `pud_drm_unregister()`）。
 
-状态（2026-09-30）：**只在 QEMU 客户机里验证过**（真设备直通，7.0.0-34 客户机）—— 315 帧
-提交全部 drawn、`dropped`/`oversize` 为 0、线上字节数是纯 QOI 的 0.74 倍、客户机 dmesg 无
-WARN/oops、`rmmod` 干净。**没有**在 RK3588 真机上验证，也**没有**接过真实合成器的 damage
-流。客户机里另有 77 帧被设备判为坏数据，来自第一次 probe（那次 `GET_CAPS` 在模拟 xHCI 上
-超时，驱动退回默认的 QOI 编码），重新加载之后就没再出现。
+验证状态（2026-10-02）：**已在 RK3588 真机上跑通**，负载是板上的 cage kiosk 实时桌面
+（6.1.172 + 本分支的驱动 + QOIZ 固件）：25 s 采样 336 帧，`submitted == drawn`，
+`dropped`/`qoiz_bad`/`qoiz_oversize`/`ep1 bad` 全 0，`CFSR`/`HFSR` = 0；线上字节数是纯 QOI
+的 **0.278 倍**（kiosk 界面大部分是平坦区域，比离线测的富桌面内容更容易压，所以别把这个
+比例当通用值），设备侧 inflate 361 µs/帧 = 222 ns/输出字节，QOI 解码+刷屏 423 µs/帧。
+
+更早的 QEMU 客户机验证（2026-09-30，7.0.0-34 客户机 + 真设备直通，那份是 7.0 分支的移植）：
+315 帧全部 drawn、0 丢、线上字节数 0.74 倍、客户机 dmesg 无 WARN/oops、`rmmod` 干净。
+客户机里另有 77 帧被判坏数据，来自第一次 probe（那次 `GET_CAPS` 在模拟 xHCI 上超时，驱动
+退回默认的 QOI 编码），重新加载之后就没再出现。
 
 ### 分带（band splitting）
 
