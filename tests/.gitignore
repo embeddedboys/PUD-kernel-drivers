@@ -1,2 +1,2 @@
-test_fb
-rect
+__pycache__/
+*.pyc

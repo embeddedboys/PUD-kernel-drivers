@@ -84,17 +84,32 @@ ccflags-y += -DPUD_USB_ASYNC=$(PUD_USB_ASYNC)
 # for that one file rather than touching the file.
 CFLAGS_jpegenc.o := -Wno-missing-prototypes -Wno-missing-declarations
 
-all: modules
-	$(MAKE) -C tests/
+all: modules tools
+	$(MAKE) -C tests test
 
-tests:
-	$(MAKE) -C tests/
+# Reusable userspace tools (tools/fbctl); the *ctl scripts need no build.
+tools:
+	$(MAKE) -C tools
+
+# Host-side, offline checks: protocol constants, band formula, module metadata.
+# No module is loaded.  Kernel-required cases are listed by `tests/run_tests.py
+# --list` and run with `make kernel-test` inside a board or `make qemu`.
+test: tools
+	$(MAKE) -C tests test
+
+# Alias kept for the old `make tests` spelling.
+tests: test
+
+kernel-test: tools
+	$(MAKE) -C tests kernel-test
 
 modules: $(if $(filter $(NATIVE_KERN_DIR),$(KBUILD_KERN_DIR)),$(NATIVE_KERN_DIR))
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 	@$(MAKE) --no-print-directory compile_commands.json
 
 clean:
+	@$(MAKE) -C tools clean
+	@$(MAKE) -C tests clean
 	$(MAKE) -C $(KBUILD_KERN_DIR) $(KBUILD_O) M=$(CURDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules clean
 
 # ---------------------------------------------------------------------------
@@ -149,7 +164,7 @@ $(NATIVE_KERN_DIR):
 	mv $@.tmp $@
 	@echo "  PREP    done, host tools now native for $(host_machine)"
 
-.PHONY: all tests modules clean qemu compile_commands.json
+.PHONY: all tools test kernel-test tests modules clean qemu compile_commands.json
 
 # ---------------------------------------------------------------------------
 # Editor support.  kbuild records one .<obj>.cmd per object, and the kernel
