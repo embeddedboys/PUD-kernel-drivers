@@ -388,6 +388,31 @@ void pud_apply_caps(struct pud *pud, const struct pud_caps *caps, int caps_len)
 
 	pud->decoder_type = caps->decoder_type;
 
+	/*
+	 * DECODER_TYPE 6 keeps one dictionary window per frame slot, laid out as
+	 * history | output, and the device refuses a band whose QOI stream does
+	 * not fit the output half: it counts g_decoder_stat_qoid_oversize and
+	 * that part of the panel silently stops updating -- the driver cannot
+	 * see it happening.  The transfer limit above does not bound this, and
+	 * the two are easy to confuse: QOI's worst case is three bytes per pixel,
+	 * so the pixels that fit the link are nearly four times the pixels that
+	 * fit the window.  A full-screen damage rectangle is exactly the case
+	 * that hits it.
+	 *
+	 * The 16 is QOI's own header and end marker, the same allowance the
+	 * transfer budget above uses.
+	 */
+	if (pud->decoder_type == PUD_DECODER_QOID) {
+		u32 fit = (PUD_QOID_DICT_MAX - 16) / 3;
+
+		if (pud->max_band_pixels > fit) {
+			dev_info(pud->dev,
+			         "decoder 6: %u pixels per band, the %u byte half window holds %u\n",
+			         pud->max_band_pixels, PUD_QOID_DICT_MAX, fit);
+			pud->max_band_pixels = fit;
+		}
+	}
+
 	/* Touch is optional: the firmware says whether it has a controller behind
 	 * EP4 (most board configs do not). */
 	if (have_params)

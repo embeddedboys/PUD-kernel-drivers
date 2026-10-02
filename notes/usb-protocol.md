@@ -193,11 +193,18 @@ usb_bulk_msg(udev, usb_rcvbulkpipe(udev, EP2_IN_ADDR), data, len, &actual_length
 
 ### 已实现的命令
 
-| cmd | 名称 | 响应 |
-| --- | --- | --- |
-| `0x01` | `PUD_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 |
-| `0x02` | `PUD_CMD_GET_CAPS` | `struct pud_caps`（共 **32** 字节：前 16 是 magic / proto_ver / frame_max / decoder_type，其后是面板参数；老固件只回前 16 字节） |
-| 其他 | — | 固件回**零长度包**（主机读回短包 → 判定不支持） |
+| cmd | 名称 | 响应 | 驱动是否发送 |
+| --- | --- | --- | --- |
+| `0x01` | `PUD_CMD_GET_SN` | 8 字节板子唯一 ID，写入 `ep2_write_buffer` 后从 EP2 IN 发回 | 是 |
+| `0x02` | `PUD_CMD_GET_CAPS` | `struct pud_caps`（共 **32** 字节：前 16 是 magic / proto_ver / frame_max / decoder_type，其后是面板参数；老固件只回前 16 字节） | 是 |
+| `0x03` | `PUD_CMD_SET_PARAM` | **控制 OUT**（`REQ_SET_PARAM`），载荷 `struct pud_params`（**8 B**）：运行期改亮度/旋转/解码器 | 否 |
+| `0x04` | `PUD_CMD_GET_PARAM` | `struct pud_param_state`（**12 B**）：读回上一笔 `SET_PARAM` 的结果 | 否 |
+| `0x05` | `PUD_CMD_GET_QOID` | `struct pud_qoid_state`（**60 B**）：`DECODER_TYPE 6` 的每个字典窗口持有哪条带（`magic`/`slots`/`serial[4]`/`len[4]`/`valid[4]`/`window`）。设备**已应答**；没有字典窗口的构建回 magic + 零 `slots` | 否 |
+| 其他 | — | 固件回**零长度包**（主机读回短包 → 判定不支持） | — |
+
+**`0x03`–`0x05` 是设备侧已实现、驱动侧尚未发送的命令**（本仓只定义 `0x01`/`0x02`）。
+`0x05` 在**请求号**空间里是 `REQ_EP4_IN`（另一个编号空间），不要与命令号混淆。
+`PUD_CMD_GET_QOID` 不便宜：一次查询实测约 **2.9 ms**，是控制传输的二十倍 ⇒ 最多**每帧一次**。
 
 驱动侧调用点（都在 `pud_probe()` 里，**顺序不要调换**）：`pud_query_caps()` 查能力报告，
 **在任何注册之前** —— DRM mode、`encoder_buf` 大小、fbdev 显存、输入设备轴范围都由它推出来
@@ -211,7 +218,8 @@ struct pud_caps {
     u32 magic;          /* PUD_CAPS_MAGIC = 0x43445550 ("PUDC") */
     u32 proto_ver;      /* PUD_PROTO_VER = 2（固件与驱动必须一致） */
     u32 frame_max;      /* 单次 EP1 传输上限（含 12 B header）：RP2350 65536 / RP2040 32768 */
-    u32 decoder_type;   /* PUD_DECODER_*: 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE, 5 QOI+deflate */
+    u32 decoder_type;   /* PUD_DECODER_*: 0 tjpgd, 1 JPEGDEC, 2 LZ4, 3 QOI, 4 RLE,
+                           5 QOI+deflate, 6 QOI+deflate+跨帧字典（5/6 设备侧实验） */
 
     /* 前 16 字节之后的字段是后来追加的；只回 16 字节的老固件仍然合法。 */
     u16 xres;           /* 面板在它被驱动的坐标系下的尺寸 */
@@ -238,7 +246,33 @@ struct pud_caps {
   5 → QOI + raw deflate（设备把每个传输 inflate 回 QOI 码流再解码，EP1 帧格式不变）；
   0/1/2 目前会报错并置 `needs_full_refresh`（见
   [display-and-refresh.md](display-and-refresh.md)）。设备没报能力时按 QOI（固件默认）。
-  这个数字是协议字段，**不要重排**；5 是追加的值，老固件不会报它。
+  这个数字是协议字段，**不要重排**；5 和 6 都是追加的值，老固件不会报它们。
+  6 → QOI + raw deflate，**并把该矩形上一次的 QOI 码流当预设字典**，见下。
+
+### `DECODER_TYPE 6` 的载荷子头
+
+EP1 载荷 = **16 B 子头 + raw deflate 流**，子头在 12 B EP1 header 之后（不计入它）：
+
+```c
+struct pud_qoid_header {
+    u32 magic;        /* PUD_QOID_MAGIC = 0x44445550 ("PUDD" 小端字节序) */
+    u16 flags;        /* 0x0001 = DELTA，0x0002 = KEYFRAME */
+    u16 reserved;     /* 必须为 0 */
+    u32 dict_serial;  /* 字典取自哪条带（设备分配的序号）；键帧为 0 */
+    u32 dict_len;     /* 编码器实际用到的字典字节数；键帧为 0 */
+};
+```
+
+字典是**设备自己窗口里的字节**，不随载荷发送；deflate 的 match 可以回指进字典。设备按
+`dict_serial` 在自己的窗口里找那条带，找不到就拒收那一笔（`g_decoder_stat_qoid_mismatch`，
+**主机看不到**）。
+
+**分带受"窗口半宽"约束，不只是传输上限**（真机踩过）：窗口布局是 `[历史][输出]` 各一半，
+所以**本条带的 QOI 流本身**也必须 ≤ `PUD_DELTA_WIN / 2`（RP2350 = 16384 B）。QOI 最坏
+3 B/px + 16 B 框架 ⇒ 每带最多 **5456 px**，比传输上限允许的 21835 少近四倍。超了设备整条丢弃
+（`g_decoder_stat_qoid_oversize`）且**主机看不到**，那块面板静默停止更新。
+真机现象：kiosk（小块 damage）正常，**GNOME 首次提交整屏 480×320 时整块黑**。收窄分带后
+强制一次 modeset 的 30 条带全部绘制、`qoid_oversize` 零新增。
 - **面板参数也来自这里**（`pud_caps_to_display()`）：分辨率、旋转、bpp、总线时钟都写进
   每台设备自己的 `pud->display_data`（`pud->display` 指向它），DRM mode 与输入设备的
   轴范围都由它推出来 —— 驱动里**不再有写死的 480×320**。查询发生在后端分配之前
