@@ -156,4 +156,4 @@ compile_commands.json:
 	fi
 
 obj-m += $(MODULE_NAME).o
-$(MODULE_NAME)-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
+$(MODULE_NAME)-y += usb.o jpegenc.o encoder.o tinyc.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o

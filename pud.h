@@ -94,6 +94,63 @@ struct pud_ep1_header {
  * Experimental on the firmware side (RP2350 only). */
 #define PUD_DECODER_QOIZ 5
 
+/*
+ * 6 is QOI + deflate with a cross-frame dictionary.  The device keeps one
+ * dictionary window per frame slot, remembers which band's QOI stream each
+ * holds, and a delta names that band by the serial the device gave it; a
+ * device-side query (PUD_CMD_GET_QOID, cmd 0x05) can report the windows.
+ *
+ * The second stage cannot use the kernel's zlib: include/linux/zlib.h has
+ * neither Z_FIXED (the device's tinyd decodes fixed-Huffman and stored blocks
+ * only) nor deflateSetDictionary (which is the whole point of the codec), so
+ * tinyc.c -- the encoder counterpart of the firmware's tinyd -- does it.
+ */
+#define PUD_DECODER_QOID 6
+
+/* Wire layout of the 16-byte sub-header that precedes the deflate stream
+ * inside an EP1 payload.  Must match the firmware's decoder.c byte for byte;
+ * the static_assert below is what keeps a field being added here from leaving
+ * PUD_QOID_HDR_SIZE behind. */
+#define PUD_QOID_MAGIC 0x44445550u /* 'PUDD' in little-endian byte order */
+#define PUD_QOID_F_DELTA 0x0001u
+#define PUD_QOID_F_KEYFRAME 0x0002u
+#define PUD_QOID_HDR_SIZE 16u
+
+struct pud_qoid_header {
+	u32 magic;
+	u16 flags;
+	u16 reserved;
+	u32 dict_serial; /* band the dictionary was built from */
+	u32 dict_len; /* dictionary bytes the encoder actually used */
+};
+
+static_assert(sizeof(struct pud_qoid_header) == PUD_QOID_HDR_SIZE);
+
+/*
+ * The device's dictionary window (PUD_DELTA_WIN in the firmware) is not in
+ * PUD_CMD_GET_CAPS; PUD_CMD_GET_QOID reports it, and the optimistic policy
+ * below does not query.  A band may use at most half of it -- the other half
+ * is the band being decoded -- so this is the RP2350 window halved.  An RP2040
+ * build has a 16384-byte window and refuses anything longer (counted there,
+ * not visible here), which is one of the reasons DECODER_TYPE 6 is kept to
+ * RP2350 for now. */
+#define PUD_QOID_DELTA_WIN 32768
+#define PUD_QOID_DICT_MAX (PUD_QOID_DELTA_WIN / 2)
+
+/* The bands we remember as dictionary candidates.  Equal to the firmware's
+ * DECODER_FRAME_SLOTS, which PUD_CMD_GET_CAPS does not report either. */
+#define PUD_QOID_HISTORY 3
+
+/* One remembered band: the serial the device gave it, the QOI length it had
+ * (0 when it was too big to keep), and the rectangle it covered, so a later
+ * band can only use it as a dictionary if it covers the same one. */
+struct pud_qoid_slot {
+	u32 serial;
+	u32 len;
+	u16 x1, y1, x2, y2;
+};
+
+
 struct pud_caps {
 	u32 magic;
 	u32 proto_ver;
@@ -221,6 +278,42 @@ struct pud {
 	u8 *qoiz_buf;
 	size_t qoiz_buf_size;
 	struct z_stream_s *qoiz_strm;
+	/*
+	 * PUD_DECODER_QOID only.  The device keeps one dictionary window per
+	 * frame slot and remembers which band's QOI stream each holds; a delta
+	 * names that band by the serial the device gave it.  These are our model
+	 * of those windows: the last PUD_QOID_HISTORY bands we sent, each with
+	 * the rectangle it covered, so a later band with the same rectangle can
+	 * use it as a dictionary.
+	 *
+	 * The serial is ours, and it is the device's too as long as every band
+	 * we send is accepted: the firmware counts a serial per accepted
+	 * submission, and EP1 flow control is what keeps it from dropping any
+	 * (invariant 2 in the firmware's AGENTS.md, measured dropped == 0).  If
+	 * the two ever drift the device refuses the delta and counts
+	 * qoid_mismatch -- that band is not drawn, nothing is corrupted, and the
+	 * next keyframe resyncs.
+	 *
+	 * qoid_hist_buf is PUD_QOID_HISTORY * PUD_QOID_DICT_MAX bytes and
+	 * qoid_work is tinyc's scratch (128 KB).  Both are CPU-only, so vmalloc.
+	 */
+	struct pud_qoid_slot qoid_slots[PUD_QOID_HISTORY];
+	u8 *qoid_hist_buf;
+	size_t qoid_hist_size;
+	void *qoid_work;
+	u32 qoid_serial;
+	unsigned int qoid_next;
+	/* The band just encoded, waiting for its flush to succeed before it is
+	 * allowed to stand as a dictionary: a serial must not be consumed for a
+	 * band the device never received, or every later delta would name the
+	 * wrong one. */
+	struct {
+		bool valid;
+		u32 len;
+		u16 x1, y1, x2, y2;
+	} qoid_pending;
+	u32 qoid_deltas;
+	u32 qoid_keyframes;
 
 	/* DRM specific data */
 	u16 *tx_buf;

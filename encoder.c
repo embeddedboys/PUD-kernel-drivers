@@ -5,6 +5,8 @@
 
 #include "encoder.h"
 #include "jpegenc.h"
+#include "pud.h"
+#include "tinyc.h"
 
 int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
                        uint8_t *work_buf, size_t *out_size, u8 quality)
@@ -158,5 +160,57 @@ int qoiz_deflate(struct z_stream_s *strm, const uint8_t *qoi, size_t qoi_size,
 		return rc == Z_OK ? -ENOSPC : -EIO;
 
 	*out_size = strm->total_out;
+	return 0;
+}
+
+/*
+ * DECODER_TYPE 6: QOI, then raw deflate against the previous band's QOI stream,
+ * behind a 16-byte sub-header.
+ *
+ * The header is built in a local and copied in: `out` is
+ * encoder_buf + PUD_EP1_HEADER_SIZE, which is four-byte aligned today, but
+ * nothing in the plumbing promises that.
+ */
+int qoid_pack(const u8 *qoi, size_t qoi_len, const u8 *dict, size_t dict_len,
+              u32 dict_serial, bool keyframe, u8 *out, size_t out_cap,
+              size_t *out_size, void *work)
+{
+	struct pud_qoid_header h;
+	size_t n;
+
+	if (!qoi || !qoi_len || !out || !out_size || !work)
+		return -EINVAL;
+	if (dict_len && !dict)
+		return -EINVAL;
+	if (dict_len + qoi_len > TINYC_WINDOW)
+		/* The device's window would not hold it either; the band is
+		 * refused there rather than truncated here. */
+		return -ENOSPC;
+	if (qoi_len > PUD_QOID_DICT_MAX)
+		/*
+		 * The window is history | output, half each, so the band's own QOI
+		 * stream has to fit the output half.  Say so here: the device would
+		 * drop the band as oversize and count g_decoder_stat_qoid_oversize,
+		 * which the driver never sees, so that part of the panel would
+		 * silently stop updating.  pud_apply_caps() sizes the bands to
+		 * prevent this, so reaching here means that budget is wrong.
+		 */
+		return -E2BIG;
+	if (out_cap <= PUD_QOID_HDR_SIZE)
+		return -ENOSPC;
+
+	n = tinyc_deflate(dict, dict_len, qoi, qoi_len, out + PUD_QOID_HDR_SIZE,
+	                  out_cap - PUD_QOID_HDR_SIZE, work);
+	if (!n)
+		return -ENOSPC;
+
+	h.magic = PUD_QOID_MAGIC;
+	h.flags = keyframe ? PUD_QOID_F_KEYFRAME : PUD_QOID_F_DELTA;
+	h.reserved = 0;
+	h.dict_serial = keyframe ? 0 : dict_serial;
+	h.dict_len = (u32)dict_len;
+	memcpy(out, &h, sizeof(h));
+
+	*out_size = PUD_QOID_HDR_SIZE + n;
 	return 0;
 }
