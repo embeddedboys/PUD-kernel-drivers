@@ -36,7 +36,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 CACHE=$HOME/.cache/pud-kbuild
 VNG=$HERE/.venv/bin/vng
-USB_ID=2e8a:0001
+USB_ID=33c3:7788
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'qemu: %s\n' "$*" >&2; exit 1; }
@@ -133,7 +133,7 @@ esac
 
 qemu_opts=${QEMU_OPTS:-}
 if [ "$pass" = yes ]; then
-    qemu_opts="-device qemu-xhci -device usb-host,vendorid=0x2e8a,productid=0x0001 $qemu_opts"
+    qemu_opts="-device qemu-xhci -device usb-host,vendorid=0x33c3,productid=0x7788 $qemu_opts"
 fi
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ say "guest kernel: $KREL"
 say "guest image : $KIMG"
 say "module      : $ko${PARAMS:+ ($PARAMS)}"
 [ -n "$cmd" ] && say "command     : $cmd"
-[ "$pass" = yes ] && say "usb         : 2e8a:0001 handed to the guest" ||
+[ "$pass" = yes ] && say "usb         : 33c3:7788 handed to the guest" ||
     say "usb         : (nothing to pass through -- the module will load, nothing will probe)"
 say ""
 

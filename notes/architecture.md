@@ -106,6 +106,7 @@ Pico 固件：解码 → TFT
 
 ```c
 /* usb.c:pud_ids[] —— 只匹配接口 0（图像接口） */
+{ USB_DEVICE_INTERFACE_NUMBER(0x33C3, 0x7788, 0) },
 { USB_DEVICE_INTERFACE_NUMBER(0x2E8A, 0x0001, 0) },
 ```
 

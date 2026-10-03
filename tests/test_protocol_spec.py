@@ -50,7 +50,7 @@ EXPECTED_STRUCT_SIZES = {
     "pud_caps": 32,
 }
 
-EXPECTED_VID_PID = [0x2E8A, 0x0001]
+EXPECTED_VID_PID = [0x33C3, 0x7788]
 
 
 def run():

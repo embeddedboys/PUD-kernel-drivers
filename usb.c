@@ -724,6 +724,8 @@ static struct usb_device_id pud_ids[] = {
 	 * device.  Interface 0 has carried the image endpoints since the first
 	 * firmware, so matching it by number keeps older devices working.
 	 */
+	{ USB_DEVICE_INTERFACE_NUMBER(0x33C3, 0x7788, 0) },
+	/* Legacy Pico-USB-Display identity, retained for existing boards. */
 	{ USB_DEVICE_INTERFACE_NUMBER(0x2E8A, 0x0001, 0) },
 	{ /* KEEP THIS */ },
 };

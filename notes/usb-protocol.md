@@ -1,12 +1,12 @@
 # USB 厂商协议（权威定义）
 
-> 这是**主机（驱动）↔ 设备（Pico 固件）之间唯一的接口约定**。
+> 这是**主机（驱动）↔ 设备固件之间唯一的接口约定**。
 > 固件侧镜像见 `Pico-USB-Display/notes/usb-protocol.md`；两边必须保持一致。
 
 ## TL;DR
 
 - 协议版本 `PUD_PROTO_VER = 2`：EP1 一次 bulk 传完 `12 B header + 压缩载荷`，**没有窗口协商控制请求**。
-- 枚举：VID:PID `0x2E8A:0x0001`，vendor-specific，Full-Speed（批量 MPS 64）；驱动只匹配**接口 0**。
+- 枚举：当前厂商固件使用 VID:PID `0x33C3:0x7788`，vendor-specific；驱动只匹配**接口 0**。驱动同时保留旧 Pico 固件的 `0x2E8A:0x0001` 兼容项。
 - 数据通道：EP1 OUT=图像流，EP2 IN=查询响应，EP4 IN=触摸主动推送；EP3 固件已定义但未实现。
 - 所有多字节字段**小端**；`bmRequestType` 固定 `TYPE_VENDOR | USB_DIR_OUT = 0x40`。
 - 分带上限由设备 `PUD_CMD_GET_CAPS` 上报，不是主机常量；改字段必须两仓同步。
@@ -15,7 +15,7 @@
 
 | 项 | 值 | 来源 |
 | --- | --- | --- |
-| VID:PID | `0x2E8A:0x0001` | `usb.c` 的 `pud_ids[]`；固件 `usbd_vendor.h` 的 `VENDOR_ID`/`PRODUCT_ID` |
+| VID:PID | `0x33C3:0x7788`（当前）；`0x2E8A:0x0001`（兼容） | `usb.c` 的 `pud_ids[]`；固件 USB 描述符 |
 | 接口类 | `0xFF`（vendor specific），子类/协议 `0` | 固件 `config_descriptor[]` |
 | 端点数量 | 3 | 同上 |
 | 供电 | bus powered，`USBD_MAX_POWER 500` | 同上 |

@@ -38,7 +38,7 @@ class DecoderCounters:
 
 class DeviceLog:
     def __init__(self):
-        self.device = usb.core.find(idVendor=0x2E8A, idProduct=0x0001)
+        self.device = usb.core.find(idVendor=0x33C3, idProduct=0x7788)
         if self.device is None:
             raise EnvironmentError("ZX USB device is unavailable")
         # Do not set configuration: QEMU's kernel driver already owns interface 0.
