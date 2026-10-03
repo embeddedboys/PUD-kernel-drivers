@@ -16,7 +16,8 @@
 | [architecture.md](architecture.md) | 代码地图：文件职责、构建组成、运行期参数、设备参数、数据流与固件对应关系 |
 | [usb-protocol.md](usb-protocol.md) | 主机↔设备 USB 厂商协议（**权威字段定义**；固件侧镜像见 `Pico-USB-Display/notes/usb-protocol.md`） |
 | [display-and-refresh.md](display-and-refresh.md) | 手工 KMS 流水线、damage 局部刷新、分带规则、缓冲区、`needs_full_refresh` 兜底与残影 |
-| [encoders.md](encoders.md) | 按设备 `decoder_type` 选编码器：QOI / RLE / QOI+deflate，JPEG 路径的限制 |
+| [encoders.md](encoders.md) | 按设备 `decoder_type` 选编码器：JPEG / QOI / RLE / QOI+deflate，输入及容量限制 |
+| [jpeg-validation.md](jpeg-validation.md) | ZX 全屏 JPEG 的 QEMU 真设备验证、复杂画面容量及超限恢复 |
 | [input-touch.md](input-touch.md) | EP4 触摸：能力位、`report_mode`、libinput 绝对轴要求、多显示器绑定 |
 | [build-and-test.md](build-and-test.md) | 构建：Makefile 设计、`PUD_USB_ASYNC`、objtree / headers / 本机三种模式 |
 | [board-testing.md](board-testing.md) | 真机与 QEMU 验证：部署、期望 dmesg、检查清单、卸载坑、固件调试 |

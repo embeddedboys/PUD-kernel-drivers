@@ -159,12 +159,12 @@ drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, swap);
 
 ## 缓冲区
 
-在 `pud_drm_dev_init_with_formats()`（`drm.c`）里分配：
+在 `pud_drm_alloc_buffers()`（`drm.c`）里分配：
 
 | 缓冲区 | 分配方式 | 大小 | 用途 |
 | --- | --- | --- | --- |
 | `pud->tx_buf` | `vmalloc` | `hdisplay * vdisplay * 2`（480×320 → 307200） | RGB565 转换目标（**只给 CPU 用**，不参与 DMA） |
-| `pud->encoder_buf` | `dma_alloc_coherent` | `rgb565_qoi_max_compressed_size(h*v)` = `8 + h*v*3 + 8`（480×320 → 460816） | QOI/RLE 编码输出 + DMA 源 |
+| `pud->encoder_buf` | `dma_alloc_coherent` | `12 + rgb565_qoi_max_compressed_size(h*v)` = `12 + 8 + h*v*3 + 8`（480×320 → 460828） | QOI/RLE 编码输出 + DMA 源 |
 | `pud->bulk_sgt` | `sg_alloc_table_from_pages`（页来自 `vmalloc_to_page(encoder_buf)`） | 同上 | **同步** `usb_sg` 路径的 SG 表；`PUD_USB_ASYNC=1` 时**完全不分配** |
 
 `hdisplay`/`vdisplay` 来自 **DRM mode，而 mode 由设备上报的面板参数在 probe 时生成**，不再是编译期常量。
@@ -204,7 +204,7 @@ if (ret < 0) {
 ```
 
 ```c
-/* pud_drm_pipe_update() 内 */
+/* pud_plane_atomic_update() 内 */
 if (drm_atomic_helper_damage_merged(old_state, state, &rect) ||
     pud->needs_full_refresh) {
     if (pud->needs_full_refresh) {

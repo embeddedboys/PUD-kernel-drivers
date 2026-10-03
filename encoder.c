@@ -8,45 +8,46 @@
 #include "pud.h"
 #include "tinyc.h"
 
-int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
+#define PUD_JPEG_MCU_SIZE 16
+#define PUD_JPEG_MIN_CAPACITY 2048
+#define PUD_JPEG_OUTPUT_RESERVE 512
+
+/* Input rows are tightly packed; capacity describes output, not input.
+ * The vendored 4:2:0 encoder reads complete 16x16 MCUs without edge padding,
+ * so reject unaligned dimensions before it can read beyond the input.
+ */
+int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t capacity,
                        uint8_t *work_buf, size_t *out_size, u8 quality)
 {
-	int rc, bits;
-	int pitch, bytewidth;
-	size_t buffer_size;
 	JPEGE_IMAGE *jpeg;
 	JPEGENCODE jpe;
+	int rc;
 
-	bits = 16;
-
-	bytewidth = (w * bits) >> 3;
-	pitch = (bytewidth + 3) & 0xfffc;
-	// printk("%s, w : %d, h : %d, pitch : %d\n", __func__, w, h, pitch);
-
-	buffer_size = len;
-
-	/* JPEGE_IMAGE is over 3 KB -- it carries the Huffman tables and a file
-	 * buffer -- which is more than a kernel stack should hold, so it lives on
-	 * the heap.  JPEGENCODE is a few ints and stays where it is. */
+	if (!out_size)
+		return -EINVAL;
+	*out_size = 0;
+	if (!rgb565 || !work_buf || !w || !h ||
+	    capacity < PUD_JPEG_MIN_CAPACITY || capacity > INT_MAX || quality > JPEGE_Q_LOW ||
+	    (w % PUD_JPEG_MCU_SIZE) || (h % PUD_JPEG_MCU_SIZE))
+		return -EINVAL;
 	jpeg = kzalloc(sizeof(*jpeg), GFP_KERNEL);
 	if (!jpeg)
 		return -ENOMEM;
 
 	jpeg->pOutput = work_buf;
-	jpeg->iBufferSize = buffer_size;
-	jpeg->pHighWater = &jpeg->pOutput[jpeg->iBufferSize - 512];
-
+	jpeg->iBufferSize = capacity;
+	jpeg->pHighWater = work_buf + capacity - PUD_JPEG_OUTPUT_RESERVE;
 	rc = JPEGEncodeBegin(jpeg, &jpe, w, h, JPEGE_PIXEL_RGB565,
 	                     JPEGE_SUBSAMPLE_420, quality);
 	if (rc == JPEGE_SUCCESS)
-		JPEGAddFrame(jpeg, &jpe, rgb565, pitch);
-
-	JPEGEncodeEnd(jpeg);
-	// printk("%s, jpeg size : %d\n", __func__, jpeg->iDataSize);
-	*out_size = jpeg->iDataSize;
-
+		rc = JPEGAddFrame(jpeg, &jpe, rgb565, w * 2);
+	if (rc == JPEGE_SUCCESS && JPEGEncodeEnd(jpeg) > 0) {
+		*out_size = jpeg->iDataSize;
+		rc = 0;
+	} else {
+		rc = rc == JPEGE_NO_BUFFER ? -ENOSPC : -EIO;
+	}
 	kfree(jpeg);
-
 	return rc;
 }
 
@@ -86,22 +87,8 @@ int rle_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
 	return 0;
 }
 
-/*
- * QOI + raw deflate (PUD_DECODER_QOIZ).  The deflate stage is the kernel's own
- * lib/zlib_deflate, so no encoder is vendored for it; the caller QOI-encodes the
- * band first and hands the QOI stream in here.
- *
- * Parameters, measured on the desktop regions of the firmware repo's
- * desktop_codecs.py (sizes against QOI alone, desktop / photo wallpaper):
- *
- *   level 1, 32 KB window, memLevel 8   -29.6% / -25.0%   workspace ~256 KB
- *   level 1,  4 KB window, memLevel 6   -29.0% / -24.8%   workspace  ~48 KB
- *
- * A band is at most one 64 KB transfer, so the big window buys nothing; 4 KB
- * and memLevel 6 keep nearly all of it for a fifth of the memory.  Level 1
- * because it already has nearly all of the gain (level 6 adds ~1.5%).  Negative
- * windowBits is zlib's way of asking for a raw stream: no zlib header, no
- * adler32 -- the device's inflate expects exactly that.
+/* Each band is an independent raw-deflate stream. Level/window choices and
+ * measured tradeoffs are documented in notes/encoders.md.
  */
 #define QOIZ_LEVEL 1
 #define QOIZ_WBITS 12

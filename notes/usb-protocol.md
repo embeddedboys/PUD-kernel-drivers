@@ -257,7 +257,7 @@ struct pud_caps {
 - `decoder_type` 决定**主机用哪个编码器**（`pud_encode_band()`）：3 → QOI，4 → RLE，
   5 → QOI + raw deflate（设备把每个传输 inflate 回 QOI 码流再解码，EP1 帧格式不变）；
   6 → QOI + raw deflate **并把该矩形上一次的 QOI 码流当预设字典**，前面加 16 字节子头
-  （`struct pud_qoid_header`，见下）；0/1/2 目前会报错并置 `needs_full_refresh`
+  （`struct pud_qoid_header`，见下）；1 → 全屏 JPEG；0/2 目前会报错并置 `needs_full_refresh`
   （见 [encoders.md](encoders.md)）。
   6 的第二层**不能用内核 zlib**（没有 `Z_FIXED`、没有 `deflateSetDictionary`），由自带的
   `tinyc.c` 做。

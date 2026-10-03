@@ -94,8 +94,6 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
                         struct drm_framebuffer *fb, struct drm_rect *clip,
                         struct drm_format_conv_state *fmtcnv)
 {
-	struct pud *pud = drm_to_pud(fb->dev);
-	// struct drm_gem_object *gem = drm_gem_fb_get_obj(fb, 0);
 	struct iosys_map dst_map = IOSYS_MAP_INIT_VADDR(dst);
 	int ret;
 
@@ -105,29 +103,10 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 
 	switch (fb->format->format) {
 	case DRM_FORMAT_RGB565:
-		/* Already in the panel's native format: copy the block straight
-		 * across. Compositors (and the 16bpp fbdev emulation) hand us RGB565
-		 * buffers, so this path must not error out.
-		 */
 		drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
 		break;
-	// case DRM_FORMAT_RGB888:
-	//     drm_fb_memcpy(&dst_map, NULL, src, fb, clip);
-	//     break;
 	case DRM_FORMAT_XRGB8888:
-		switch (pud->pixel_format) {
-		case DRM_FORMAT_RGB565:
-			/* The conversion scratch state comes from the shadow plane
-			 * state.  The old always-false `swap` flag it replaces is gone;
-			 * a byte-swapped panel would want drm_fb_xrgb8888_to_rgb565be()
-			 * here instead. */
-			drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip,
-			                          fmtcnv);
-			break;
-			// case DRM_FORMAT_RGB888:
-			//     drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, src, fb, clip);
-			//     break;
-		}
+		drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, src, fb, clip, fmtcnv);
 		break;
 	default:
 		drm_err_once(fb->dev, "Format is not supported: %p4cc\n",
@@ -136,41 +115,12 @@ static int pud_buf_copy(void *dst, struct iosys_map *src,
 	}
 
 	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
-
 	return ret;
 }
 
-/*
- * Frame encoding / refresh policy.
- *
- * Frames are encoded with RGB565 QOI, RGB565 RLE or QOI+deflate -- whichever the
- * device reports it decodes (PUD_CMD_GET_CAPS -> decoder_type), because pushing
- * QOI at an RLE firmware (or the other way around) only produces dropped frames.
- * All three are lossless and fast to encode, and the firmware decodes arbitrary
- * partial windows correctly (unlike the JPEGDEC path whose MCU/crop logic
- * mis-clips a sub-image decoded at x != 0 and could wedge the display under
- * load).  So the damage rectangle is sent as-is: small, lossless and fast.
- *
- * QOI+deflate is QOI followed by the kernel's own raw deflate over the QOI
- * stream (see qoiz_deflate()); it only exists when the device reports it.
- *
- * A rectangle whose stream might not fit the USB transfer limit is split into
- * horizontal bands and each band is encoded and flushed on its own. Both
- * codecs' worst case is 3 bytes per pixel, so a band of at most
- * pud->max_band_pixels pixels always fits.  That budget comes from the device
- * (PUD_CMD_GET_CAPS, see pud_read_caps()) because it depends on how much RAM
- * the firmware has: an RP2040 accepts half-size transfers, an RP2350 the full
- * 64 KB.  It falls back to PUD_DEFAULT_BAND_PIXELS when the device does not
- * report anything.
- */
-/*
- * Let the band just encoded stand as a dictionary for later bands with the
- * same rectangle, and consume the serial the device gave it.
- *
- * Only called once the flush has succeeded.  The device counts a serial for
- * every band it accepts, so a serial spent on a band that never arrived would
- * make every later delta name the wrong one -- and the device would refuse
- * them all, silently, because the driver cannot see its counters.
+/* Dictionary history is committed only after a successful transfer.  Otherwise
+ * a later delta could refer to bytes the device never received.  The pending
+ * QOI stream must not overwrite a remembered dictionary while encoding.
  */
 static void pud_qoid_commit(struct pud *pud)
 {
@@ -179,14 +129,6 @@ static void pud_qoid_commit(struct pud *pud)
 	if (!pud->qoid_pending.valid)
 		return;
 
-	/*
-	 * Copy the QOI stream here, not at encode time.  The slot at qoid_next
-	 * still describes an older band until the lines below, so writing its
-	 * bytes earlier would leave that description pointing at a different
-	 * band's stream whenever a flush failed in between -- and a delta built
-	 * from the wrong history is a stream the device decodes without
-	 * complaining, which is corruption rather than a refusal.
-	 */
 	if (pud->qoid_pending.len)
 		memcpy(pud->qoid_hist_buf + (size_t)s * PUD_QOID_DICT_MAX,
 		       pud->qoiz_buf, pud->qoid_pending.len);
@@ -203,176 +145,197 @@ static void pud_qoid_commit(struct pud *pud)
 	pud->qoid_pending.valid = false;
 }
 
-static int pud_encode_band(struct pud *pud, const struct drm_rect *band,
-                           unsigned int width, unsigned int height,
+static const struct pud_qoid_slot *
+pud_qoid_find_dictionary(const struct pud *pud, const struct drm_rect *band)
+{
+	const struct pud_qoid_slot *best = NULL;
+	unsigned int i;
+
+	for (i = 0; i < PUD_QOID_HISTORY; i++) {
+		const struct pud_qoid_slot *slot = &pud->qoid_slots[i];
+
+		if (!slot->len || slot->x1 != band->x1 || slot->x2 != band->x2 ||
+		    slot->y1 != band->y1 || slot->y2 != band->y2)
+			continue;
+		if (!best || slot->serial > best->serial)
+			best = slot;
+	}
+	return best;
+}
+
+static int pud_encode_qoiz(struct pud *pud, unsigned int width,
+                           unsigned int height, u8 *out, size_t capacity,
                            size_t *out_size)
 {
+	size_t qoi_size;
+	int rc;
+
+	if (!pud->qoiz_strm)
+		return -EOPNOTSUPP;
+
+	/* QOI into the side buffer, then deflate from there into the
+	 * transfer buffer.  The deflate output is checked against the
+	 * transfer limit by the caller, like every other codec's. */
+	rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
+	                       pud->qoiz_buf_size, pud->qoiz_buf,
+	                       &qoi_size);
+	if (rc)
+		return rc;
+	return qoiz_deflate(pud->qoiz_strm, pud->qoiz_buf, qoi_size, out,
+	                    capacity, out_size);
+}
+
+static int pud_encode_qoid(struct pud *pud, const struct drm_rect *band,
+                           unsigned int width, unsigned int height,
+                           u8 *out, size_t capacity, size_t *out_size)
+{
+	const struct pud_qoid_slot *best = NULL;
+	const u8 *dict = NULL;
+	size_t dict_len = 0, qoi_size;
+	u32 dict_serial = 0;
+	bool keyframe = true;
+	int rc;
+
+	if (!pud->qoid_work || !pud->qoid_hist_buf)
+		return -EOPNOTSUPP;
+
+	rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
+	                       pud->qoiz_buf_size, pud->qoiz_buf,
+	                       &qoi_size);
+	if (rc)
+		return rc;
+
+	best = pud_qoid_find_dictionary(pud, band);
+	if (best) {
+		dict = pud->qoid_hist_buf +
+		       (size_t)(best - pud->qoid_slots) * PUD_QOID_DICT_MAX;
+		dict_len = best->len;
+		dict_serial = best->serial;
+		keyframe = false;
+	}
+
+	rc = qoid_pack(pud->qoiz_buf, qoi_size, dict, dict_len,
+	               dict_serial, keyframe, out, capacity, out_size,
+	               pud->qoid_work);
+	if (rc)
+		return rc;
+
+	if (keyframe)
+		pud->qoid_keyframes++;
+	else
+		pud->qoid_deltas++;
+
+	/*
+	 * Keep the QOI stream for later bands, but do not let it be used
+	 * until the flush succeeds.  A band whose QOI stream is longer
+	 * than a dictionary may be is still worth remembering with a zero
+	 * length: the device gave it a serial either way, and our
+	 * numbering has to keep up with the device's.
+	 */
+	pud->qoid_pending.valid = true;
+	pud->qoid_pending.len =
+	        qoi_size <= PUD_QOID_DICT_MAX ? (u32)qoi_size : 0;
+	pud->qoid_pending.x1 = band->x1;
+	pud->qoid_pending.y1 = band->y1;
+	pud->qoid_pending.x2 = band->x2;
+	pud->qoid_pending.y2 = band->y2;
+
+	return 0;
+}
+
+static int pud_encode_band(struct pud *pud, const struct drm_rect *band,
+                           size_t *out_size)
+{
+	unsigned int width = drm_rect_width(band);
+	unsigned int height = drm_rect_height(band);
 	u8 *out = pud->encoder_buf + PUD_EP1_HEADER_SIZE;
 	size_t capacity = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
 
 	switch (pud->decoder_type) {
+	case PUD_DECODER_JPEGDEC:
+		return jpeg_encode_rgb565((u8 *)pud->tx_buf, width, height,
+		                          pud_payload_capacity(pud), out, out_size,
+		                          pud->encoder_quality);
 	case PUD_DECODER_QOI:
 		return qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
 		                         capacity, out, out_size);
 	case PUD_DECODER_RLE:
 		return rle_encode_rgb565((u8 *)pud->tx_buf, width, height,
 		                         capacity, out, out_size);
-	case PUD_DECODER_QOIZ: {
-		size_t qoi_size;
-		int rc;
-
-		if (!pud->qoiz_strm)
-			return -EOPNOTSUPP;
-
-		/* QOI into the side buffer, then deflate from there into the
-		 * transfer buffer.  The deflate output is checked against the
-		 * transfer limit by the caller, like every other codec's. */
-		rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
-		                       pud->qoiz_buf_size, pud->qoiz_buf,
-		                       &qoi_size);
-		if (rc)
-			return rc;
-		return qoiz_deflate(pud->qoiz_strm, pud->qoiz_buf, qoi_size, out,
-		                    capacity, out_size);
-	}
-	case PUD_DECODER_QOID: {
-		const struct pud_qoid_slot *best = NULL;
-		const u8 *dict = NULL;
-		size_t dict_len = 0, qoi_size;
-		u32 dict_serial = 0;
-		bool keyframe = true;
-		unsigned int i;
-		int rc;
-
-		if (!pud->qoid_work || !pud->qoid_hist_buf)
-			return -EOPNOTSUPP;
-
-		rc = qoi_encode_rgb565((u8 *)pud->tx_buf, width, height,
-		                       pud->qoiz_buf_size, pud->qoiz_buf,
-		                       &qoi_size);
-		if (rc)
-			return rc;
-
-		/*
-		 * Newest remembered band covering this exact rectangle.  This is
-		 * the optimistic policy: we assume the device's serial counter
-		 * still matches ours, which EP1 flow control makes true (the
-		 * firmware's invariant 2, measured dropped == 0).  A mismatch
-		 * costs one undrawn band, not corruption, and the next keyframe
-		 * resyncs.
-		 */
-		for (i = 0; i < PUD_QOID_HISTORY; i++) {
-			const struct pud_qoid_slot *s = &pud->qoid_slots[i];
-
-			if (!s->len || s->x1 != band->x1 || s->x2 != band->x2 ||
-			    s->y1 != band->y1 || s->y2 != band->y2)
-				continue;
-			if (!best || s->serial > best->serial)
-				best = s;
-		}
-		if (best) {
-			dict = pud->qoid_hist_buf +
-			       (size_t)(best - pud->qoid_slots) * PUD_QOID_DICT_MAX;
-			dict_len = best->len;
-			dict_serial = best->serial;
-			keyframe = false;
-		}
-
-		rc = qoid_pack(pud->qoiz_buf, qoi_size, dict, dict_len,
-		               dict_serial, keyframe, out, capacity, out_size,
-		               pud->qoid_work);
-		if (rc)
-			return rc;
-
-		if (keyframe)
-			pud->qoid_keyframes++;
-		else
-			pud->qoid_deltas++;
-
-		/*
-		 * Keep the QOI stream for later bands, but do not let it be used
-		 * until the flush succeeds.  A band whose QOI stream is longer
-		 * than a dictionary may be is still worth remembering with a zero
-		 * length: the device gave it a serial either way, and our
-		 * numbering has to keep up with the device's.
-		 */
-		pud->qoid_pending.valid = true;
-		pud->qoid_pending.len =
-		        qoi_size <= PUD_QOID_DICT_MAX ? (u32)qoi_size : 0;
-		pud->qoid_pending.x1 = band->x1;
-		pud->qoid_pending.y1 = band->y1;
-		pud->qoid_pending.x2 = band->x2;
-		pud->qoid_pending.y2 = band->y2;
-
-		return 0;
-	}
+	case PUD_DECODER_QOIZ:
+		return pud_encode_qoiz(pud, width, height, out, capacity, out_size);
+	case PUD_DECODER_QOID:
+		return pud_encode_qoid(pud, band, width, height, out, capacity, out_size);
 	default:
 		return -EOPNOTSUPP;
 	}
 }
 
+static int pud_send_band(struct pud *pud, struct iosys_map *src,
+                         struct drm_framebuffer *fb, struct drm_rect *band,
+                         struct drm_format_conv_state *fmtcnv)
+{
+	size_t encoded = 0;
+	int ret;
+
+	ret = pud_buf_copy(pud->tx_buf, src, fb, band, fmtcnv);
+	if (ret)
+		return ret;
+
+	ret = pud_encode_band(pud, band, &encoded);
+	if (ret) {
+		if (ret == -EOPNOTSUPP)
+			drm_err_once(fb->dev,
+			             "device decodes decoder_type %u, which this driver cannot encode\n",
+			             pud->decoder_type);
+		else
+			drm_err_once(fb->dev, "band encode failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = pud_flush(pud, band->x1, band->y1, band->x2 - 1, band->y2 - 1,
+	                pud->encoder_buf + PUD_EP1_HEADER_SIZE, encoded);
+	if (ret < 0)
+		return ret;
+
+	/* Publish dictionary bytes only after their transfer has succeeded. */
+	pud_qoid_commit(pud);
+	return 0;
+}
+
 static void pud_fb_dirty(struct iosys_map *src, struct drm_framebuffer *fb,
-                         struct drm_rect *rect,
+                         const struct drm_rect *damage,
                          struct drm_format_conv_state *fmtcnv)
 {
 	struct pud *pud = drm_to_pud(fb->dev);
+	struct drm_rect update = *damage;
 	struct drm_rect band;
 	unsigned int rows, y;
-	size_t encoded;
 	int ret;
 
-	if (rect->x2 <= rect->x1 || rect->y2 <= rect->y1)
+	if (drm_rect_width(&update) <= 0 || drm_rect_height(&update) <= 0)
 		return;
 
-	rows = pud->max_band_pixels / (rect->x2 - rect->x1);
-	if (rows < 1)
-		rows = 1;
+	/* JPEG devices accept complete images at (0,0), never damage bands. */
+	if (pud->decoder_type == PUD_DECODER_JPEGDEC) {
+		drm_rect_init(&update, 0, 0, fb->width, fb->height);
+		rows = fb->height;
+	} else {
+		rows = max_t(unsigned int, 1,
+		             pud->max_band_pixels / drm_rect_width(&update));
+	}
 
-	for (y = rect->y1; y < rect->y2; y += rows) {
-		unsigned int width, height;
-
-		band.x1 = rect->x1;
-		band.x2 = rect->x2;
+	for (y = update.y1; y < update.y2; y += rows) {
+		band = update;
 		band.y1 = y;
-		band.y2 = min(y + rows, (unsigned int)rect->y2);
-
-		width = band.x2 - band.x1;
-		height = band.y2 - band.y1;
-
-		ret = pud_buf_copy(pud->tx_buf, src, fb, &band, fmtcnv);
-		if (ret)
-			return;
-
-		encoded = 0;
-		ret = pud_encode_band(pud, &band, width, height, &encoded);
+		band.y2 = min(y + rows, (unsigned int)update.y2);
+		ret = pud_send_band(pud, src, fb, &band, fmtcnv);
 		if (ret) {
-			if (ret == -EOPNOTSUPP)
-				drm_err_once(
-				        fb->dev,
-				        "device decodes decoder_type %u, which this driver cannot encode\n",
-				        pud->decoder_type);
-			else
-				drm_err_once(fb->dev,
-				             "band encode failed: %d\n", ret);
+			/* Copy, encode and USB failures must all preserve lost damage. */
 			pud->needs_full_refresh = true;
+			drm_dbg_driver(fb->dev, "refresh failed: %d\n", ret);
 			return;
 		}
-
-		ret = pud_flush(pud, band.x1, band.y1, band.x2 - 1, band.y2 - 1,
-		                pud->encoder_buf + PUD_EP1_HEADER_SIZE,
-		                encoded);
-		if (ret < 0) {
-			/* The frame did not reach the display: those pixels would stay
-			 * stale until the application happens to redraw them. Ask for a
-			 * full repaint on the next update instead. */
-			drm_dbg_driver(fb->dev, "flush failed: %d\n", ret);
-			pud->needs_full_refresh = true;
-			return;
-		}
-
-		/* The band reached the device, so it has a serial now and its QOI
-		 * stream is in one of the device's windows. */
-		pud_qoid_commit(pud);
 	}
 }
 
@@ -482,59 +445,58 @@ static int pud_connector_get_modes(struct drm_connector *connector)
  * touch panel") contains, so the vendor match lands whatever the size
  * comparison makes of the numbers.
  */
-static u8 pud_edid[128];
-
-static void pud_edid_build(unsigned int width_mm, unsigned int height_mm)
+static void pud_edid_build(u8 edid[128], unsigned int width_mm,
+                           unsigned int height_mm)
 {
 	static const u8 header[8] = { 0x00, 0xff, 0xff, 0xff,
 		                      0xff, 0xff, 0xff, 0x00 };
 	u8 sum = 0;
 	int i;
 
-	memset(pud_edid, 0, sizeof(pud_edid));
-	memcpy(pud_edid, header, sizeof(header));
+	memset(edid, 0, 128);
+	memcpy(edid, header, sizeof(header));
 
 	/* manufacturer "PUD": five bits per letter, 'A' = 1 (not its ASCII code) */
-	pud_edid[8] = (u8)((('P' - 'A' + 1) << 2) | (('U' - 'A' + 1) >> 3));
-	pud_edid[9] = (u8)(((('U' - 'A' + 1) & 0x07) << 5) | ('D' - 'A' + 1));
+	edid[8] = (u8)((('P' - 'A' + 1) << 2) | (('U' - 'A' + 1) >> 3));
+	edid[9] = (u8)(((('U' - 'A' + 1) & 0x07) << 5) | ('D' - 'A' + 1));
 
-	pud_edid[10] = 0x01; /* product code 1 */
-	pud_edid[12] = 0x01; /* serial 1 */
-	pud_edid[16] = 1; /* week */
-	pud_edid[17] = 2025 - 1990; /* year */
-	pud_edid[18] = 1; /* EDID 1.4 */
-	pud_edid[19] = 4;
-	pud_edid[20] = 0x80; /* digital input */
-	pud_edid[21] = (u8)(width_mm / 10); /* EDID counts in cm */
-	pud_edid[22] = (u8)(height_mm / 10);
-	pud_edid[23] = 0x78; /* gamma 2.2 */
+	edid[10] = 0x01; /* product code 1 */
+	edid[12] = 0x01; /* serial 1 */
+	edid[16] = 1; /* week */
+	edid[17] = 2025 - 1990; /* year */
+	edid[18] = 1; /* EDID 1.4 */
+	edid[19] = 4;
+	edid[20] = 0x80; /* digital input */
+	edid[21] = (u8)(width_mm / 10); /* EDID counts in cm */
+	edid[22] = (u8)(height_mm / 10);
+	edid[23] = 0x78; /* gamma 2.2 */
 
 	/* descriptor 1: monitor name, 13 characters, padded with 0x0a */
-	pud_edid[57] = 0xfc;
-	memcpy(&pud_edid[59], "pud touch pan", 13);
+	edid[57] = 0xfc;
+	memcpy(&edid[59], "pud touch pan", 13);
 
 	/* descriptor 2: ASCII string */
-	pud_edid[75] = 0xfe;
-	memcpy(&pud_edid[77], "PUD touch panel", 15);
+	edid[75] = 0xfe;
+	memcpy(&edid[77], "PUD touch panel", 15);
 
 	/* descriptor 3: range limits -- 48..62 Hz, 30..60 kHz, 80 MHz, none
 	 * supported */
-	pud_edid[93] = 0xfd;
-	pud_edid[95] = 48;
-	pud_edid[96] = 62;
-	pud_edid[97] = 30;
-	pud_edid[98] = 60;
-	pud_edid[99] = 8;
-	pud_edid[101] = 0x0a;
+	edid[93] = 0xfd;
+	edid[95] = 48;
+	edid[96] = 62;
+	edid[97] = 30;
+	edid[98] = 60;
+	edid[99] = 8;
+	edid[101] = 0x0a;
 
 	/* descriptor 4: dummy */
-	pud_edid[111] = 0x10;
+	edid[111] = 0x10;
 
-	pud_edid[126] = 0; /* no extension blocks */
+	edid[126] = 0; /* no extension blocks */
 
 	for (i = 0; i < 127; i++)
-		sum = (u8)(sum + pud_edid[i]);
-	pud_edid[127] = (u8)(0 - sum);
+		sum = (u8)(sum + edid[i]);
+	edid[127] = (u8)(0 - sum);
 }
 
 static const struct drm_connector_helper_funcs pud_connector_hfuncs = {
@@ -678,45 +640,31 @@ static int pud_drm_create_encoder(struct pud *pud)
 	return drm_connector_attach_encoder(&pud->connector, encoder);
 }
 
-static int pud_drm_dev_init_with_formats(
-        struct pud *pud, const uint32_t *formats, unsigned int formats_count,
-        const struct drm_display_mode *mode, size_t tx_buf_size)
+static int pud_drm_alloc_buffers(struct pud *pud,
+                                 const struct drm_display_mode *mode,
+                                 size_t tx_buf_size)
 {
 	struct drm_device *drm = &pud->drm;
 	size_t enc_size;
-	int rc;
+	int rc __maybe_unused;
 #if !PUD_USB_ASYNC
 	struct page **pages;
 	unsigned int i, num_pages;
 	void *ptr;
 #endif
 
-	pr_info("%s\n", __func__);
-
-	rc = drm_mode_config_init(drm);
-	if (rc) {
-		pr_err("failed to init mode config\n");
-		return rc;
-	}
-
 	pud->tx_buf = vmalloc(tx_buf_size);
 	if (!pud->tx_buf)
 		return -ENOMEM;
 
-	/* The encoder output buffer is DMA-allocated so its pages are within the
-	 * USB controller's DMA range (no swiotlb bounce).  dma_alloc_coherent()
-	 * returns a vmap address for the CPU encoder to write to.  The
-	 * synchronous usb_sg path transfers from an SG table built over the
-	 * underlying pages; the asynchronous path hands the URB the buffer's DMA
-	 * address directly and does not need one.
-	 *
-	 * It must hold the worst-case QOI stream for a full frame
-	 * (8 + pixels*3 + 8), since the QOI encoder rejects undersized buffers.
+	/* CPU scratch may be vmalloc; only the USB source must be DMA coherent.
+	 * Its owner releases both buffers through pud_drm_release_buffers().
 	 */
 	enc_size = rgb565_qoi_max_compressed_size((size_t)mode->hdisplay *
 	                                          mode->vdisplay);
 	if (!enc_size)
 		return -EINVAL;
+	enc_size += PUD_EP1_HEADER_SIZE;
 	pud->encoder_buf = dma_alloc_coherent(drm->dev, enc_size,
 	                                      &pud->encoder_dma, GFP_KERNEL);
 	if (!pud->encoder_buf)
@@ -740,14 +688,14 @@ static int pud_drm_dev_init_with_formats(
 		return rc;
 #endif
 
-	/* TODO: use debugfs to set params */
-	// pud->encoder_quality = JPEGE_Q_BEST;
-	// pud->encoder_quality = JPEGE_Q_HIGH;
-	// pud->encoder_quality = JPEGE_Q_MED;
-	pud->encoder_quality = JPEGE_Q_LOW;
+	return 0;
+}
 
-	drm_mode_copy(&pud->mode, mode);
-	pr_info("mode: %ux%u\n", pud->mode.hdisplay, pud->mode.vdisplay);
+static int pud_drm_init_connector(struct pud *pud)
+{
+	struct drm_device *drm = &pud->drm;
+	u8 edid[128];
+	int rc;
 
 	drm_connector_helper_add(&pud->connector, &pud_connector_hfuncs);
 	rc = drm_connector_init(drm, &pud->connector, &pud_connector_funcs,
@@ -788,12 +736,40 @@ static int pud_drm_dev_init_with_formats(
 
 	/* Give the output an identity, so a compositor can tell which output the
 	 * touchscreen belongs to (see pud_edid_build()). */
-	pud_edid_build(pud->display->width_mm ?: 74,
+	pud_edid_build(edid, pud->display->width_mm ?: 74,
 	               pud->display->height_mm ?: 49);
 	rc = drm_connector_update_edid_property(&pud->connector,
-	                                        (const struct edid *)pud_edid);
+	                                        (const struct edid *)edid);
 	if (rc)
 		pr_warn("failed to attach the panel EDID: %d\n", rc);
+
+	return 0;
+}
+
+static int pud_drm_dev_init_with_formats(
+        struct pud *pud, const uint32_t *formats, unsigned int formats_count,
+        const struct drm_display_mode *mode, size_t tx_buf_size)
+{
+	struct drm_device *drm = &pud->drm;
+	int rc;
+
+	pr_info("%s\n", __func__);
+
+	rc = drm_mode_config_init(drm);
+	if (rc) {
+		pr_err("failed to init mode config\n");
+		return rc;
+	}
+
+	rc = pud_drm_alloc_buffers(pud, mode, tx_buf_size);
+	if (rc)
+		return rc;
+	pud->encoder_quality = JPEGE_Q_LOW;
+
+	drm_mode_copy(&pud->mode, mode);
+	rc = pud_drm_init_connector(pud);
+	if (rc)
+		return rc;
 
 	/* The mode config has to know how to validate modes and commits before the
 	 * pipeline objects exist: they are checked against it as they are set up. */
@@ -821,7 +797,6 @@ static int pud_drm_dev_init_with_formats(
 		return rc;
 	}
 
-	pud->pixel_format = formats[0];
 
 	drm_dbg_kms(drm, "mode: %ux%u", pud->mode.hdisplay, pud->mode.vdisplay);
 
@@ -842,6 +817,20 @@ static int pud_drm_dev_init(struct pud *pud,
 	                                     bufsize);
 }
 
+static void pud_drm_release_encoder(struct pud *pud)
+{
+	qoiz_stream_free(pud->qoiz_strm);
+	pud->qoiz_strm = NULL;
+	vfree(pud->qoiz_buf);
+	pud->qoiz_buf = NULL;
+	pud->qoiz_buf_size = 0;
+	vfree(pud->qoid_work);
+	pud->qoid_work = NULL;
+	vfree(pud->qoid_hist_buf);
+	pud->qoid_hist_buf = NULL;
+	pud->qoid_hist_size = 0;
+}
+
 static void pud_drm_release_buffers(struct pud *pud)
 {
 #if !PUD_USB_ASYNC
@@ -857,16 +846,7 @@ static void pud_drm_release_buffers(struct pud *pud)
 		vfree(pud->tx_buf);
 		pud->tx_buf = NULL;
 	}
-	qoiz_stream_free(pud->qoiz_strm);
-	pud->qoiz_strm = NULL;
-	vfree(pud->qoiz_buf);
-	pud->qoiz_buf = NULL;
-	pud->qoiz_buf_size = 0;
-	vfree(pud->qoid_work);
-	pud->qoid_work = NULL;
-	vfree(pud->qoid_hist_buf);
-	pud->qoid_hist_buf = NULL;
-	pud->qoid_hist_size = 0;
+	pud_drm_release_encoder(pud);
 }
 
 /*
@@ -880,6 +860,7 @@ static void pud_drm_release_buffers(struct pud *pud)
  */
 int pud_drm_setup_encoder(struct pud *pud)
 {
+	pud->encoder_quality = JPEGE_Q_LOW;
 	if (pud->decoder_type != PUD_DECODER_QOIZ &&
 	    pud->decoder_type != PUD_DECODER_QOID)
 		return 0;
@@ -898,31 +879,22 @@ int pud_drm_setup_encoder(struct pud *pud)
 
 	if (pud->decoder_type == PUD_DECODER_QOIZ) {
 		pud->qoiz_strm = qoiz_stream_alloc();
-		if (!pud->qoiz_strm) {
-			vfree(pud->qoiz_buf);
-			pud->qoiz_buf = NULL;
-			pud->qoiz_buf_size = 0;
-			return -ENOMEM;
-		}
+		if (!pud->qoiz_strm)
+			goto no_memory;
 		return 0;
 	}
 
 	pud->qoid_hist_size = PUD_QOID_HISTORY * PUD_QOID_DICT_MAX;
 	pud->qoid_hist_buf = vzalloc(pud->qoid_hist_size);
 	pud->qoid_work = vzalloc(tinyc_work_size());
-	if (!pud->qoid_hist_buf || !pud->qoid_work) {
-		vfree(pud->qoid_work);
-		pud->qoid_work = NULL;
-		vfree(pud->qoid_hist_buf);
-		pud->qoid_hist_buf = NULL;
-		pud->qoid_hist_size = 0;
-		vfree(pud->qoiz_buf);
-		pud->qoiz_buf = NULL;
-		pud->qoiz_buf_size = 0;
-		return -ENOMEM;
-	}
+	if (!pud->qoid_hist_buf || !pud->qoid_work)
+		goto no_memory;
 
 	return 0;
+
+no_memory:
+	pud_drm_release_encoder(pud);
+	return -ENOMEM;
 }
 
 struct drm_device *pud_drm_alloc(struct device *dev,
@@ -937,7 +909,7 @@ struct drm_device *pud_drm_alloc(struct device *dev,
 	pud = devm_drm_dev_alloc(dev, &pud_drm_driver, struct pud, drm);
 	if (IS_ERR(pud)) {
 		pr_err("failed to allocate drm\n");
-		return ERR_PTR(-ENOMEM);
+		return ERR_CAST(pud);
 	}
 	drm = &pud->drm;
 
@@ -962,7 +934,7 @@ struct drm_device *pud_drm_alloc(struct device *dev,
 	if (rc) {
 		pr_err("failed to init drm dev\n");
 		pud_drm_release_buffers(pud);
-		return ERR_PTR(-ENOMEM);
+		return ERR_PTR(rc);
 	}
 
 	return drm;
@@ -991,32 +963,8 @@ MODULE_PARM_DESC(
         initial_mode,
         "set a mode from probe so the panel lights up without userspace; teardown after using it hangs (see notes/pitfalls.md 4.5)");
 
-/*
- * Put a mode on the panel at probe time.
- *
- * The driver sends pixels only from its flush callback, and that runs for a
- * commit which leaves the CRTC active with the framebuffer on the plane.  The
- * DRM fbdev emulation creates the framebuffer and lets fbcon bind to it, but
- * nothing commits a mode by itself: fbcon never calls fb_set_par here (measured
- * with and without a DRM master), and a desktop session does not drive this
- * device either -- mutter keeps a GPU that is not the boot GPU for rendering
- * only, so it never creates a monitor on it (GNOME journal: "Added device
- * '/dev/dri/cardN' (pud-drm)" and "Created gbm renderer", and no monitor line).
- * A machine where this is the only DRM device would have a compositor to do it,
- * but a headless one still shows nothing.
- *
- * So commit the fixed mode once, from here.  Userspace is free to replace the
- * state afterwards: this is a first commit, not a preference, and the panel
- * works whether or not anybody else ever commits anything.  Note that
- * drm_fb_helper_restore_fbdev_mode_unlocked() cannot be used for it -- it gives
- * up when a userspace DRM master exists (drm_fb_helper_is_bound()).
- *
- * KNOWN ISSUE -- teardown after a commit from here hangs (measured 3/3 on 7.0,
- * QEMU with the real device passed through): `rmmod` prints "pud_drm_unregister"
- * and stops, wedging the machine; the stall is inside drm_dev_unplug(), before
- * the fbcon switch back.  The same driver without initial_mode unloads cleanly.
- * 6.1 was only ever checked for "the panel lights up", so this is probably not
- * 7.0-specific.  See notes/pitfalls.md 4.5.
+/* Probe-time mode commit is optional. Teardown after initial_mode=1 is known
+ * to hang on 7.0; keep it disabled by default (notes/pitfalls.md section 4.5).
  */
 static void pud_drm_set_initial_mode(struct pud *pud)
 {
@@ -1066,8 +1014,8 @@ int pud_drm_register(struct drm_device *drm)
 	rc = drm_dev_register(drm, 0);
 	if (rc) {
 		pr_err("failed to register drm dev\n");
-		return -1;
-	};
+		return rc;
+	}
 
 	/* NULL picks the driver's preferred_depth, which is 16 here -- the same
 	 * thing the old drm_fbdev_generic_setup(drm, 0) asked for. */

@@ -1,15 +1,15 @@
-# 编码器：QOI / RLE / QOI+deflate
+# 编码器：全屏 JPEG 与无损分带
 
 > 主机用哪个编码器由设备 `PUD_CMD_GET_CAPS` 的 `decoder_type` 决定，不在主机侧写死；
-> 三种编码器最坏情况都是 3 字节/像素，所以同一套分带预算对它们都成立。
+> JPEG 使用整屏容量检查；无损编码使用各自的分带预算。
 
 ## TL;DR
 
-- `decoder_type` → 编码器：`3` QOI、`4` RLE、`5` QOI + raw deflate；`0/1/2`（tjpgd/JPEGDEC/LZ4）
-  在 DRM 局部刷新路径里**明确报错**并置 `needs_full_refresh`，不把垃圾推给设备。
+- `decoder_type` → 编码器：`1` 全屏 JPEG、`3` QOI、`4` RLE、`5` QOI + raw deflate；
+  `0/2`（tjpgd/LZ4）在 DRM 路径明确报错并置 `needs_full_refresh`。
 - 设备没报能力时按固件的默认值 **QOI** 走。
 - **给 RLE 固件发 QOI 只会被解码器丢掉**（magic 不对），反之亦然。
-- JPEG 只用于 fbdev 整屏路径：**不要给 JPEG 帧传非零 `x`**（固件 JPGEODEC 裁切会卡死解码任务）。
+- JPEG 用于 DRM 和旧 fbdev 整屏路径：**不要给 JPEG 帧传非零 `x`**（固件 JPGEODEC 裁切会卡死解码任务）。
 - `PUD_DECODER_RLE`（4）在真机上**未验证**，只做了编译验证。
 
 ## 编码器选择
@@ -22,14 +22,14 @@
 | `PUD_DECODER_RLE` = 4 | `rle_encode_rgb565()` | **未上机验证**（固件当前 `DECODER_TYPE=3`） |
 | `PUD_DECODER_QOIZ` = 5 | QOI → 内核 raw deflate | QEMU 客户机验证，未在 RK3588 真机验证 |
 | `PUD_DECODER_QOID` = 6 | QOI → `tinyc`（固定 Huffman + 预设字典） | **策略 A**：序号乐观、不做 `GET_QOID` 查询；编码器宿主机闭环验证，未上机 |
-| `PUD_DECODER_TJPGD` = 0 / `JPEGDEC` = 1 / `LZ4` = 2 | — | DRM 路径报错并置 `needs_full_refresh` |
+| `PUD_DECODER_JPEGDEC` = 1 | `jpeg_encode_rgb565()`，全屏 4:2:0 | ZX USB HS + QEMU 直通验证 |
+| `PUD_DECODER_TJPGD` = 0 / `LZ4` = 2 | — | DRM 路径报错并置 `needs_full_refresh` |
 
 为什么从 JPEG 改成 QOI：JPEGDEC 解码器的 MCU/crop 逻辑在 `x != 0` 的子图上会错位裁切，
 局部刷新既不准也容易把显示卡死。QOI 之后：**无损**（不会越刷越脏）、**编码极快**（主机不成为瓶颈）、
 **解码器按像素处理**（任意子矩形都正确，没有 MCU 对齐问题）。
 
-（JPEG 路径保留在 `jpegenc.c`，只被 fbdev 后端 `pud_fb_deferred_io()` → `jpeg_encode_rgb565()`
-使用：整屏、坐标固定 `(0,0)`。详见文末"JPEG 路径的限制"。）
+JPEG 编码器由 DRM 和旧 fbdev 复用，均为整屏、坐标固定 `(0,0)`；详见文末限制。
 
 ## QOI + deflate（`PUD_DECODER_QOIZ` = 5）
 
@@ -49,7 +49,7 @@ raw）、`memLevel 6`。相对纯 QOI 的字节数：合成桌面 **−29%**、�
 生命周期：在 `pud_drm_setup_encoder()` 里分配，**必须等能力报告落地之后**（`pud_drm_alloc()`
 时还不知道 `decoder_type`）；分配失败会让 probe 失败，**不回落到 QOI** —— 那种固件对每个传输都做
 inflate，给它发 QOI 等于每帧都被丢掉（设备侧 `g_decoder_stat_qoiz_bad` 会一直涨）。释放挂在
-`pud_drm_release_buffers()` 上（正常拔插走 `pud_drm_unregister()`）。
+`pud_drm_release_encoder()` 上，由 `pud_drm_release_buffers()` 调用；初始化失败也走同一释放路径。
 
 状态（2026-09-30）：**只在 QEMU 客户机里验证过**（真设备直通，7.0.0-34 客户机）—— 315 帧提交全部
 drawn、`dropped`/`oversize` 为 0、线上字节数是纯 QOI 的 0.74 倍、客户机 dmesg 无 WARN/oops、
@@ -126,7 +126,20 @@ Wayland 会话才走 cage 那样的 atomic + damage 路径。
 
 ## JPEG 路径的限制
 
-fbdev 后端发的是整屏 JPEG，坐标固定 `(0,0)`；DRM 后端按 `decoder_type` 选 QOI/RLE 分带。
+DRM 检测到 `decoder_type=1` 后，把 damage 扩成整屏，只发送一张 JPEG；旧 fbdev 也发整屏。
+其他已支持的 decoder 保持局部分带。
+
+- 输入是紧密排列的 RGB565，4:2:0、`JPEGE_Q_LOW`；不是 Python 播放器的质量数值。
+- vendored 编码器没有边缘补齐，宽高必须是 16 的倍数；包装函数拒绝其他尺寸。
+- 输出容量包含编码器所需余量；编码失败返回负 errno，输出长度为零，禁止发送部分码流。
+- 编码结果（含取偶 padding 和 12 B header）必须符合设备上限；`pud_flush()` 超限拒绝，绝不截断。
+- 仍保留主机 65535 B 上限；ZX 固件上报 65536 B。复杂画面可能无法容纳，失败后等待下一次全屏刷新。
+- `tests/test_jpeg_encode.py` 编译实际包装函数和 codec，在 ASan 下验证内存边界，并用 Pillow
+  独立解码纯色/渐变 JPEG；随机高熵图检查容量不足错误，小容量和非 MCU 对齐输入检查参数错误。
+- vendored encoder 的 64 位位流写入使用非对齐指针，UBSan alignment 会报告；本轮没有改上游 codec，
+  当前 x86-64 验证不代表所有 CPU 的非对齐访问安全性。
+
+验证方法、实测计数及复杂画面边界见 [jpeg-validation.md](jpeg-validation.md)。
 **不要给 JPEG 帧传非零 `x`**：固件侧 JPEGDEC 在 `x != 0` 时 `iWidthUsed` 会算出负值，`xe` 被填成
 子图内坐标、`len` 变成巨大的无符号数，一次这样的 flush 就把 `decoder_task` 卡死、帧槽永不释放
 （真机复现：`submitted/drawn = 2/0`，主机持续超时）。固件仓 `Pico-USB-Display/notes/decoders.md`

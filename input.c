@@ -13,23 +13,8 @@
 
 #include "pud.h"
 
-/*
- * How the panel presents itself to userspace.  Both modes are absolute devices
- * (libinput's absolute types are multi-touch screens, single-touch screens and
- * tablets); they differ in what a desktop does with them:
- *
- *   touch   (default) INPUT_PROP_DIRECT + MT-B + BTN_TOUCH: a touchscreen, so
- *           touching the panel acts where you touch -- as long as the
- *           compositor maps it to this output (GNOME has no way to choose that
- *           for an external touchscreen, it matches on the device size, which
- *           is why the panel size is reported).
- *   pointer ABS_X/Y + BTN_LEFT without INPUT_PROP_DIRECT: an absolute pointer
- *           (the QEMU usb-tablet kind), mapped across the whole desktop.  It
- *           always works, at the price of the panel being a position pad
- *           rather than "touch what you see".
- *
- * MT-B is used for the touch mode because that is what libinput's touchscreen
- * gesture/tracking code expects; a single finger just occupies slot 0.
+/* Touch uses direct MT-B reports; pointer maps ABS_X/Y across the desktop.
+ * Both need physical axis resolution for userspace display matching.
  */
 static char *report_mode = "touch";
 module_param(report_mode, charp, 0444);
@@ -40,21 +25,40 @@ static bool pud_report_touch(void)
 	return strcmp(report_mode, "pointer") != 0;
 }
 
-/*
- * EP4 is an interrupt IN endpoint the device pushes touch reports on: one per
- * poll while the panel is held, one when it is released, and nothing at all
- * while it is idle.  The host therefore keeps exactly one URB pending and
- * re-submits it from the completion handler -- there is no control request to
- * ask for a sample, and no error may end the stream, or input would stay dead
- * until the next replug.
- */
+static void pud_report_sample(struct pud *pud, const u8 *report)
+{
+	struct input_dev *indev = pud->indev;
+	bool pressed;
+	u16 x, y;
+
+	pressed = !!(report[0] & PUD_TOUCH_PRESSED);
+	x = (u16)(report[1] << 8 | report[2]);
+	y = (u16)(report[3] << 8 | report[4]);
+
+	if (pud_report_touch()) {
+		input_mt_slot(indev, 0);
+		input_mt_report_slot_state(indev, MT_TOOL_FINGER,
+		                           pressed);
+		if (pressed) {
+			input_report_abs(indev, ABS_MT_POSITION_X, x);
+			input_report_abs(indev, ABS_MT_POSITION_Y, y);
+		}
+		input_report_abs(indev, ABS_X, x);
+		input_report_abs(indev, ABS_Y, y);
+		input_report_key(indev, BTN_TOUCH, pressed);
+	} else {
+		input_report_key(indev, BTN_LEFT, pressed);
+		input_report_abs(indev, ABS_X, x);
+		input_report_abs(indev, ABS_Y, y);
+	}
+	input_sync(indev);
+}
+
+/* Keep one interrupt URB pending. Only cancellation/unload ends the stream. */
 static void pud_tp_urb_callback(struct urb *urb)
 {
 	struct pud *pud = urb->context;
-	struct input_dev *indev = pud->indev;
 	const u8 *report = pud->ep_int_buf;
-	bool pressed;
-	u16 x, y;
 
 	if (urb->status) {
 		switch (urb->status) {
@@ -81,31 +85,79 @@ static void pud_tp_urb_callback(struct urb *urb)
 			              "touch report version %u, expected %u\n",
 			              report[6], PUD_TOUCH_VERSION);
 	} else {
-		pressed = !!(report[0] & PUD_TOUCH_PRESSED);
-		x = (u16)(report[1] << 8 | report[2]);
-		y = (u16)(report[3] << 8 | report[4]);
-
-		if (pud_report_touch()) {
-			input_mt_slot(indev, 0);
-			input_mt_report_slot_state(indev, MT_TOOL_FINGER,
-			                           pressed);
-			if (pressed) {
-				input_report_abs(indev, ABS_MT_POSITION_X, x);
-				input_report_abs(indev, ABS_MT_POSITION_Y, y);
-			}
-			input_report_abs(indev, ABS_X, x);
-			input_report_abs(indev, ABS_Y, y);
-			input_report_key(indev, BTN_TOUCH, pressed);
-		} else {
-			input_report_key(indev, BTN_LEFT, pressed);
-			input_report_abs(indev, ABS_X, x);
-			input_report_abs(indev, ABS_Y, y);
-		}
-		input_sync(indev);
+		pud_report_sample(pud, report);
 	}
 
 	if (!pud->disconnected)
 		usb_submit_urb(urb, GFP_ATOMIC);
+}
+
+static int pud_input_configure_axes(struct pud *pud, struct input_dev *input_dev)
+{
+	unsigned int xmax, ymax;
+	int rc;
+
+	/* Coordinates are panel coordinates in the frame the panel is driven in:
+	 * the firmware applies TFT_ROTATION and clamps before reporting, so
+	 * there is nothing to swap or scale on this side. */
+	xmax = pud->display ? pud->display->xres - 1 : 479;
+	ymax = pud->display ? pud->display->yres - 1 : 319;
+
+	input_set_abs_params(input_dev, ABS_X, 0, xmax, 0, 0);
+	input_set_abs_params(input_dev, ABS_Y, 0, ymax, 0, 0);
+
+	/*
+	 * libinput considers an absolute device without a valid resolution a
+	 * kernel bug, and Mutter compares the size that resolution implies with
+	 * the outputs when it decides where a touchscreen belongs.  The device
+	 * reports its active area; without it there is nothing sensible to set.
+	 */
+	if (pud->display && pud->display->width_mm && pud->display->height_mm) {
+		input_abs_set_res(input_dev, ABS_X,
+		                  DIV_ROUND_CLOSEST(xmax + 1,
+		                                    pud->display->width_mm));
+		input_abs_set_res(input_dev, ABS_Y,
+		                  DIV_ROUND_CLOSEST(ymax + 1,
+		                                    pud->display->height_mm));
+	} else {
+		dev_warn(
+		        pud->dev,
+		        "panel size unknown, leaving the input resolution at 0\n");
+	}
+
+	if (pud_report_touch()) {
+		input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, xmax, 0,
+		                     0);
+		input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, ymax, 0,
+		                     0);
+		if (pud->display && pud->display->width_mm &&
+		    pud->display->height_mm) {
+			input_abs_set_res(
+			        input_dev, ABS_MT_POSITION_X,
+			        DIV_ROUND_CLOSEST(xmax + 1,
+			                          pud->display->width_mm));
+			input_abs_set_res(
+			        input_dev, ABS_MT_POSITION_Y,
+			        DIV_ROUND_CLOSEST(ymax + 1,
+			                          pud->display->height_mm));
+		}
+
+		input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
+		__set_bit(INPUT_PROP_DIRECT, input_dev->propbit);
+
+		rc = input_mt_init_slots(
+		        input_dev, 1, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
+		if (rc) {
+			dev_err(pud->dev, "failed to init MT slots: %d\n",
+			        rc);
+			return rc;
+		}
+	} else {
+		input_set_capability(input_dev, EV_KEY, BTN_LEFT);
+		input_set_capability(input_dev, EV_KEY, BTN_RIGHT);
+	}
+
+	return 0;
 }
 
 int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
@@ -115,7 +167,6 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	struct usb_host_interface *interface;
 	struct input_dev *input_dev;
 	struct pud *pud;
-	unsigned int xmax, ymax;
 	int pipe, maxp;
 	int i, rc;
 
@@ -172,65 +223,9 @@ int pud_input_setup(struct usb_interface *intf, const struct usb_device_id *id)
 	input_dev->id.product = le16_to_cpu(udev->descriptor.idProduct);
 	input_dev->id.version = le16_to_cpu(udev->descriptor.bcdDevice);
 
-	/* Coordinates are panel coordinates in the frame the panel is driven in:
-	 * the firmware applies TFT_ROTATION and clamps before reporting, so
-	 * there is nothing to swap or scale on this side. */
-	xmax = pud->display ? pud->display->xres - 1 : 479;
-	ymax = pud->display ? pud->display->yres - 1 : 319;
-
-	input_set_abs_params(input_dev, ABS_X, 0, xmax, 0, 0);
-	input_set_abs_params(input_dev, ABS_Y, 0, ymax, 0, 0);
-
-	/*
-	 * libinput considers an absolute device without a valid resolution a
-	 * kernel bug, and Mutter compares the size that resolution implies with
-	 * the outputs when it decides where a touchscreen belongs.  The device
-	 * reports its active area; without it there is nothing sensible to set.
-	 */
-	if (pud->display && pud->display->width_mm && pud->display->height_mm) {
-		input_abs_set_res(input_dev, ABS_X,
-		                  DIV_ROUND_CLOSEST(xmax + 1,
-		                                    pud->display->width_mm));
-		input_abs_set_res(input_dev, ABS_Y,
-		                  DIV_ROUND_CLOSEST(ymax + 1,
-		                                    pud->display->height_mm));
-	} else {
-		dev_warn(
-		        &intf->dev,
-		        "panel size unknown, leaving the input resolution at 0\n");
-	}
-
-	if (pud_report_touch()) {
-		input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, xmax, 0,
-		                     0);
-		input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, ymax, 0,
-		                     0);
-		if (pud->display && pud->display->width_mm &&
-		    pud->display->height_mm) {
-			input_abs_set_res(
-			        input_dev, ABS_MT_POSITION_X,
-			        DIV_ROUND_CLOSEST(xmax + 1,
-			                          pud->display->width_mm));
-			input_abs_set_res(
-			        input_dev, ABS_MT_POSITION_Y,
-			        DIV_ROUND_CLOSEST(ymax + 1,
-			                          pud->display->height_mm));
-		}
-
-		input_set_capability(input_dev, EV_KEY, BTN_TOUCH);
-		__set_bit(INPUT_PROP_DIRECT, input_dev->propbit);
-
-		rc = input_mt_init_slots(
-		        input_dev, 1, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
-		if (rc) {
-			dev_err(&intf->dev, "failed to init MT slots: %d\n",
-			        rc);
-			goto free_buf;
-		}
-	} else {
-		input_set_capability(input_dev, EV_KEY, BTN_LEFT);
-		input_set_capability(input_dev, EV_KEY, BTN_RIGHT);
-	}
+	rc = pud_input_configure_axes(pud, input_dev);
+	if (rc)
+		goto free_buf;
 
 	input_set_drvdata(input_dev, pud);
 

@@ -23,7 +23,7 @@
 | `encoder.c` / `.h` | 编码层封装：`qoi_encode_rgb565()` / `rle_encode_rgb565()` / QOI+deflate |
 | `rgb565_qoi.c` / `.h` | RGB565 QOI 编解码库（来自 `rgb565-qoi/`，仅加 `__KERNEL__` include 适配） |
 | `rgb565_rle.c` / `.h` | RGB565 RLE 编解码库（来自 `rgb565-rle/`，同样只改 include） |
-| `jpegenc.c` / `.h` | 早期 JPEG 编码路径，现只被 fbdev 后端用到（`pud_fb_deferred_io()` → `jpeg_encode_rgb565()`，整屏、坐标固定 `(0,0)`） |
+| `jpegenc.c` / `.h` | JPEG 编码路径，由 DRM decoder 1 和旧 fbdev 后端复用，整屏、坐标固定 `(0,0)` |
 | `input.c` | 触摸输入：EP4 中断 URB（设备主动推送）+ `input_dev` 注册 |
 | `dma_gem_dma_helper.c` | 内核 `drm_gem_dma_helper` 的 vendored 副本：**不在 Makefile、没被编译**（DRM 后端用内核自带 `drm_gem_dma_*`），改它没有任何效果 |
 
@@ -82,15 +82,18 @@ pud-y += usb.o jpegenc.o encoder.o rgb565_qoi.o rgb565_rle.o fb.o drm.o input.o
 应用/合成器 (gnome-shell, X, ...)
    │  atomic commit，带 FB_DAMAGE_CLIPS
    ▼
-pud_drm_pipe_update()                drm.c
+pud_plane_atomic_update()                drm.c
    │  drm_atomic_helper_damage_merged() → 本次变化的包围盒
    ▼
 pud_fb_dirty()                       drm.c
-   │  ① 按行分带（每带 ≤ pud->max_band_pixels，值由设备上报）
-   │  ② pud_buf_copy() 把该带转成 RGB565，放进 pud->tx_buf
-   │  ③ pud_encode_band() 编码进 pud->encoder_buf
+   │  JPEG 扩成整屏；无损编码按 max_band_pixels 分带
+   ▼
+pud_send_band()                      drm.c
+   │  pud_buf_copy() → pud_encode_band() → pud_flush()
+   │  QOID 字典只在发送成功后提交
    ▼
 pud_flush()                          usb.c
+   │  pud_prepare_frame() 校验容量、组头并补齐奇数载荷
    │  EP1 bulk：12 B header (xs,ys,xe,ye,size) + 压缩载荷（v2：无控制请求）
    │  路径由 PUD_USB_ASYNC 选：0 = usb_sg_init()+usb_sg_wait()；1 = usb_submit_urb()+completion
    ▼

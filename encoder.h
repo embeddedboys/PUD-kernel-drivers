@@ -7,7 +7,7 @@
 #include "rgb565_qoi.h"
 #include "rgb565_rle.h"
 
-int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t len,
+int jpeg_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t capacity,
                        uint8_t *work_buf, size_t *out_size, u8 quality);
 int qoi_encode_rgb565(uint8_t *rgb565, u16 w, u16 h, size_t work_size,
                       uint8_t *work_buf, size_t *out_size);

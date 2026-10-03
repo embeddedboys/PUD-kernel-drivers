@@ -199,53 +199,48 @@ static int pud_ep1_transfer(struct pud *pud, size_t len)
 
 #endif /* PUD_USB_ASYNC */
 
-ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
-                  const u8 jpeg_data[], size_t data_size)
+static int pud_prepare_frame(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
+                             const u8 *payload, size_t payload_size)
 {
-	struct pud_ep1_header *hdr = (struct pud_ep1_header *)pud->encoder_buf;
-	int rc;
+	struct pud_ep1_header *header;
+	u8 *output;
+	size_t padded_size;
 
-	/*
-	 * After a few failures in a row, submit at most one transfer per second.
-	 * A failing transfer holds a USB worker for the whole watchdog, so a
-	 * device that is gone (or a host controller that wedged) would otherwise
-	 * be hammered as fast as damage arrives.  One try per second still picks
-	 * the display back up once the device is there again.
-	 */
+	if (!payload || !payload_size || payload_size > pud_payload_capacity(pud))
+		return -EMSGSIZE;
+
+	header = (void *)pud->encoder_buf;
+	output = pud->encoder_buf + PUD_EP1_HEADER_SIZE;
+	padded_size = ALIGN(payload_size, 2);
+	if (payload != output)
+		memcpy(output, payload, payload_size);
+	/* Older firmware rejects odd payload lengths; never read past input. */
+	if (padded_size != payload_size)
+		output[payload_size] = 0;
+
+	header->xs = x;
+	header->ys = y;
+	header->xe = xe;
+	header->ye = ye;
+	header->size = padded_size;
+	return PUD_EP1_HEADER_SIZE + padded_size;
+}
+
+ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
+                  const u8 *payload, size_t payload_size)
+{
+	int length, rc;
+
+	/* Bound retries when failures would otherwise monopolise the worker. */
 	if (pud->flush_fails >= PUD_FLUSH_FAIL_MAX &&
 	    time_before(jiffies, pud->flush_last_fail + msecs_to_jiffies(1000)))
 		return -EIO;
 
-	/*
-	 * Round the payload up to even.  The device does not require this any
-	 * more (measured 2026-09: odd and even both land), but firmware built
-	 * before that rejected an odd size outright -- and silently, so a host
-	 * would just see half its frames never arrive.  One padding byte is
-	 * cheaper than a compatibility matrix; see notes/usb-protocol.md.
-	 */
-	if (data_size % 2)
-		data_size += 1;
+	length = pud_prepare_frame(pud, x, y, xe, ye, payload, payload_size);
+	if (length < 0)
+		return length;
 
-	if (data_size > pud->encoder_buf_size - PUD_EP1_HEADER_SIZE)
-		data_size = pud->encoder_buf_size - PUD_EP1_HEADER_SIZE;
-
-	/* The header lives in the DMA-coherent buffer the SG table already covers,
-	 * right in front of the payload, so one bulk transfer carries both and the
-	 * rectangle no longer needs a control request. */
-	hdr->xs = x;
-	hdr->ys = y;
-	hdr->xe = xe;
-	hdr->ye = ye;
-	hdr->size = data_size;
-
-	/* Move the frame into the DMA buffer before the SG bulk send */
-	if (jpeg_data != pud->encoder_buf + PUD_EP1_HEADER_SIZE)
-		memcpy(pud->encoder_buf + PUD_EP1_HEADER_SIZE, jpeg_data,
-		       data_size);
-
-	/* one transfer carries the header and the payload (see pud_ep1_transfer) */
-	rc = pud_ep1_transfer(pud, PUD_EP1_HEADER_SIZE + data_size);
-
+	rc = pud_ep1_transfer(pud, length);
 	if (rc < 0) {
 		pud->flush_fails++;
 		pud->flush_last_fail = jiffies;
@@ -255,7 +250,8 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 		dev_warn_ratelimited(
 		        pud->dev,
 		        "EP1 transfer failed (%d) for %ux%u+%u+%u, %zu bytes\n",
-		        rc, xe - x + 1, ye - y + 1, x, y, data_size);
+		        rc, xe - x + 1, ye - y + 1, x, y,
+		        (size_t)length - PUD_EP1_HEADER_SIZE);
 
 		if (pud->flush_fails == PUD_FLUSH_FAIL_MAX)
 			dev_err(pud->dev,
@@ -265,15 +261,7 @@ ssize_t pud_flush(struct pud *pud, u16 x, u16 y, u16 xe, u16 ye,
 		pud->flush_fails = 0;
 	}
 
-	/*
-	 * Defensive only: a bulk endpoint that has stalled stays halted until the
-	 * host clears it.  The shipped firmware drops a header it cannot believe
-	 * instead of stalling EP1 (see the initial_mode note in drm.c, and the
-	 * firmware's notes/usb-protocol.md), so a stall should not reach here at
-	 * all -- measured: an oversized transfer leaves g_ep1_stat.oversize >= 1
-	 * and the host sees no error.  This stays for an older firmware, or a
-	 * controller-level stall, where without it the display never comes back.
-	 */
+	/* Older firmware/controller stalls need explicit endpoint recovery. */
 	if (rc < 0 && rc != -ETIMEDOUT) {
 		dev_warn_once(pud->dev,
 		              "EP1 transfer failed (%d), clearing the halt\n",
@@ -295,9 +283,6 @@ static int pud_read_unique_id(struct usb_interface *intf, u8 serial[],
 		pr_info("serial length should less than 8!\n");
 		return -EINVAL;
 	}
-
-	// /* Dummy read, device need to prepares data */
-	// ret = pud_transfer(pud, 0x01, REQ_EP2_IN, EP2_IN_ADDR, serial, len);
 
 	ret = pud_transfer(pud, PUD_CMD_GET_SN, REQ_EP2_IN, EP2_IN_ADDR, serial,
 	                   len);
@@ -456,7 +441,7 @@ const struct pud_display pud_default_display = {
 	.height_mm = 49,
 };
 
-static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
+static int __maybe_unused pud_fb_setup(struct usb_interface *intf,
                                        const struct usb_device_id *id,
                                        const struct pud_caps *caps,
                                        int caps_len)
@@ -490,8 +475,10 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	pud->encoder_buf = dma_alloc_coherent(
 	        pud->dev, info->var.xres * info->var.yres * 2,
 	        &pud->encoder_dma, GFP_KERNEL);
-	if (!pud->encoder_buf)
+	if (!pud->encoder_buf) {
+		pud_framebuffer_release(info);
 		return -ENOMEM;
+	}
 	pud->encoder_buf_size = info->var.xres * info->var.yres * 2;
 
 	pud->encoder_quality = JPEGE_Q_LOW;
@@ -501,6 +488,10 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 	rc = pud_register_framebuffer(info);
 	if (rc) {
 		dev_err(pud->dev, "failed to register framebuffer");
+		dev_set_drvdata(dev, NULL);
+		dma_free_coherent(dev, pud->encoder_buf_size,
+		                  pud->encoder_buf, pud->encoder_dma);
+		pud_framebuffer_release(info);
 		return rc;
 	}
 
@@ -511,17 +502,16 @@ static int __maybe_unused pud_fb_steup(struct usb_interface *intf,
 
 static void __maybe_unused pud_fb_cleanup(struct usb_interface *intf)
 {
-	struct pud *pud = dev_get_drvdata(&intf->dev);
-	printk("%s\n", __func__);
+	struct pud *pud = usb_get_intfdata(intf);
+	struct fb_info *info = pud->info;
 
-	pud_unregister_framebuffer(pud->info);
-	pud_framebuffer_release(pud->info);
-	if (pud->encoder_buf) {
-		dma_free_coherent(pud->dev, pud->encoder_buf_size,
-		                  pud->encoder_buf, pud->encoder_dma);
-		pud->encoder_buf = NULL;
-		pud->encoder_buf_size = 0;
-	}
+	pud_unregister_framebuffer(info);
+	/* Stop deferred sends before freeing their DMA source. */
+	cancel_delayed_work_sync(&info->deferred_work);
+	dma_free_coherent(pud->dev, pud->encoder_buf_size,
+	                  pud->encoder_buf, pud->encoder_dma);
+	usb_set_intfdata(intf, NULL);
+	pud_framebuffer_release(info);
 }
 
 static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
@@ -564,8 +554,9 @@ static int __maybe_unused pud_drm_setup(struct usb_interface *intf,
 
 	return 0;
 err_free_drm:
+	usb_set_intfdata(intf, NULL);
 	pud_drm_release(drm);
-	return -1;
+	return rc;
 }
 
 static void __maybe_unused pud_drm_cleanup(struct usb_interface *intf)
@@ -642,7 +633,7 @@ static int pud_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		usb_set_intfdata(intf, pud);
 	} else {
 #if PUD_DEF_DISP_BACKEND == PUD_DISP_BACKEND_FBDEV
-		rc = pud_fb_steup(intf, id, caps, caps_len);
+		rc = pud_fb_setup(intf, id, caps, caps_len);
 #else
 		rc = pud_drm_setup(intf, id, caps, caps_len);
 #endif
@@ -690,6 +681,10 @@ static void pud_disconnect(struct usb_interface *intf)
 
 	pud->disconnected = true;
 
+#if PUD_ENABLE_INPUT_SUPPORT
+	pud_input_cleanup(intf);
+#endif
+
 	if (!pud->input_only) {
 #if PUD_DEF_DISP_BACKEND == PUD_DISP_BACKEND_FBDEV
 		pud_fb_cleanup(intf);
@@ -698,9 +693,6 @@ static void pud_disconnect(struct usb_interface *intf)
 #endif
 	}
 
-#if PUD_ENABLE_INPUT_SUPPORT
-	pud_input_cleanup(intf);
-#endif
 }
 
 /*

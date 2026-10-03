@@ -52,7 +52,7 @@
 #define PUD_USB_ASYNC 0
 #endif
 
-// TODO: Currently only support less than 40000 bytes transfer
+/* Host transfer ceiling, including the EP1 header. */
 #define USB_TRANS_MAX_SIZE 65535
 
 /* EP1 framing (protocol v2): every transfer is this header followed by the
@@ -322,7 +322,6 @@ struct pud {
 	/* DRM specific data */
 	u16 *tx_buf;
 	struct sg_table bulk_sgt;
-	u32 pixel_format;
 	/* Set when a flush fails: that damage rectangle is lost, so the next
 	 * update repaints the whole screen to clear any stale region. */
 	bool needs_full_refresh;
@@ -363,6 +362,18 @@ extern const struct pud_display pud_default_display;
  * negative errno.  Uses a throwaway heap object for the DMA-able control
  * buffer, because it runs before struct pud exists. */
 int pud_query_caps(struct usb_device *udev, struct pud_caps *caps);
+
+/* Reserve header and legacy even-length padding before encoding. */
+static inline size_t pud_payload_capacity(const struct pud *pud)
+{
+	size_t transfer_size = min_t(size_t, pud->encoder_buf_size,
+	                             pud->frame_max);
+
+	if (transfer_size <= PUD_EP1_HEADER_SIZE)
+		return 0;
+
+	return (transfer_size - PUD_EP1_HEADER_SIZE) & ~(size_t)1;
+}
 
 /* Fold a capability report into a device: transfer limits, decoder and, when
  * the device sent the parameter block, the panel size/rotation. */
