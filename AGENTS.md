@@ -1,5 +1,32 @@
 # AGENTS.md
 
+## Skills（本仓遵守）
+
+本仓的一切工作遵循工作区 `../AGENTS.md` 约定的四份 skill。**摘要随仓携带**（离线可读），
+完整版在工作区 `skills/`。
+
+| skill | 本仓副本 | 一句话 |
+| --- | --- | --- |
+| Repository Exploration | [`skills/developer-repository-exprolation/Summary.md`](skills/developer-repository-exprolation/Summary.md) | 先理解再修改；证据优先于直觉 |
+| Knowledge | [`skills/developer-knowledge/Summary.md`](skills/developer-knowledge/Summary.md) | 首屏结论、事实分级、信息预算、漂移检查 |
+| Testing | [`skills/developer-testing/Summary.md`](skills/developer-testing/Summary.md) | tests/tools 分层、oracle 声明、退出码、N 次测量 |
+| Code Quality | [`skills/developer-code-quality/Summary.md`](skills/developer-code-quality/Summary.md) | **能跑 ≠ 完成**；可读性有硬标准 |
+
+### 动手前的四行闸门（**强制**）
+
+改任何代码或配置**之前**先写出这四行 ✓。**第 1 行或第 4 行写不出来就停手** ✗ —— 那是在猜 ✗。
+
+```text
+已验证：<确认了什么，凭据是什么：代码/实测/构建日志>
+仍未知：<还没确认的；不许用推测填空>
+最小改动：<只改一处，为什么是这一处>
+生效验证：<如何证明改动真的生效：探针 / grep 生成物 / 构建日志里的编译行>
+```
+
+**先确认仪器，再相信读数** ✓ —— 宏没被注入、文件没被编译、配置被 defconfig 覆盖，
+这三件事的症状都是"结果莫名其妙" ✗。
+
+
 > 本文件只写 PUD-kernel-drivers **特有**的铁律、架构不变量与构建/验证入口。
 > 知识库与测试的**通用约定**（文档结构、信息预算、事实分级、oracle 声明、CLI/退出码、命名、
 > 文档↔代码漂移检查）以工作区根 [`../AGENTS.md`](../AGENTS.md) 为准，这里不再重复。
@@ -132,3 +159,10 @@
 - **每次更新知识库都要做文档↔代码漂移检查**：默认值、常量、开关、**特性是否存在**逐条核对，
   以代码/实测为准；过时测量标注"在配置 X 下测得"而非删除（见 [`../AGENTS.md`](../AGENTS.md) 一）。
 - 只写**已验证**的结论；推测显式标注"未验证"。中文叙述，命令/路径/标识符保留英文。
+
+## 驱动工具的方式（与工作区规范同源）
+
+- **不许盲目 `sleep`，不许 blanket 超时** ✓ —— 用**轮询就绪**（0.2 s 间隔）+ **秒级超时** ✓。
+  硬件测试必须**显式定义就绪检测**，不要依赖"设备恰好已经跑着" ✓。
+- 反例：`sleep 22` + `timeout 300` ⇒ 明明 0.4 s 就有结论的操作拖到几分钟 ✗。
+- 正解：`usb.core.find` 轮询 ✓、控制请求 0.5 s 超时 ✓、shell 命令 `timeout 10` ✓。
